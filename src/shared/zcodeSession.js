@@ -52,7 +52,7 @@ function discoverDbPaths(deps = {}) {
     try { if (fs.statSync(override).isFile()) return [override]; } catch (_) { /* fall through */ }
   }
   const dir = resolveDbDir(env);
-  let entries = [];
+  let entries;
   try { entries = fs.readdirSync(dir); } catch (_) { return []; }
   // db.sqlite, plus any channel variants like db-<channel>.sqlite.
   return entries
@@ -63,7 +63,7 @@ function discoverDbPaths(deps = {}) {
 
 function discoverRolloutFiles(deps = {}) {
   const dir = resolveRolloutDir(deps.env || process.env);
-  let entries = [];
+  let entries;
   try { entries = fs.readdirSync(dir); } catch (_) { return []; }
   return entries
     .filter((name) => /^model-io-.*\.jsonl$/.test(name))
@@ -333,7 +333,7 @@ function rowFromRolloutLine(obj) {
 function readUsageRowsFromRollout(deps = {}) {
   const rows = [];
   for (const file of discoverRolloutFiles(deps)) {
-    let content = '';
+    let content;
     try { content = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
     for (const line of content.split(/\r?\n/)) {
       const trimmed = line.trim();

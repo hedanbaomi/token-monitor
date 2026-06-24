@@ -78,7 +78,7 @@ function discoverTranscriptFiles(deps = {}) {
   const files = [];
   const seen = new Set();
   function walk(dir) {
-    let entries = [];
+    let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
@@ -254,7 +254,7 @@ function readUsageRows(deps = {}) {
   const files = deps.files || discoverTranscriptFiles(deps);
   const rows = [];
   for (const file of files) {
-    let content = '';
+    let content;
     try { content = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
     for (const line of content.split(/\r?\n/)) {
       const trimmed = line.trim();
