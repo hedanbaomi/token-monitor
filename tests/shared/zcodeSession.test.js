@@ -79,12 +79,13 @@ test('collectZcodeUsage strips the provider prefix from model ids', () => {
   assert.ok(periods.today.clientModels.zcode['GLM-5.2']);
 });
 
-test('collectZcodeUsage sums components when totalTokens is absent', () => {
+test('collectZcodeUsage falls back to input+output when totalTokens is absent', () => {
   const now = Date.UTC(2026, 5, 20, 12, 0, 0);
   const ts = Date.UTC(2026, 5, 20, 1, 0, 0);
+  // ZCode input is cache-inclusive, so total = input + output (NOT + cache).
   const rows = [row({ completedAtMs: ts, timestamp: new Date(ts).toISOString(), totalTokens: 0, inputTokens: 200, outputTokens: 100, cacheReadTokens: 30, cacheWriteTokens: 20 })];
   const periods = zcode.collectZcodeUsage({ nowMs: now, deps: { readUsageRows: () => rows } });
-  assert.equal(periods.today.totalTokens, 350); // 200+100+30+20
+  assert.equal(periods.today.totalTokens, 300); // 200+100 only (cache not re-added)
 });
 
 test('collectZcodeUsage ignores rows with zero tokens and zero cost', () => {
@@ -105,19 +106,20 @@ test('allTimeSince excludes rows older than the anchor', () => {
 });
 
 // --- custom pricing -> cost ------------------------------------------------
-test('collectZcodeUsage computes cost from a per-million pricing map', () => {
+test('collectZcodeUsage computes cost from a per-million pricing map (cache-inclusive input)', () => {
   const now = Date.UTC(2026, 5, 20, 12, 0, 0);
   const ts = Date.UTC(2026, 5, 20, 1, 0, 0);
-  // 1M input + 0.5M output + 2M cacheRead
+  // ZCode input_tokens is cache-inclusive: 3M input contains 2M cacheRead,
+  // so fresh input = 3M - 2M = 1M. Pricing: input 0.5/M, output 2/M, cacheRead 0.05/M.
   const rows = [row({
     completedAtMs: ts, timestamp: new Date(ts).toISOString(),
     model: 'builtin:bigmodel-coding-plan/GLM-5.2',
-    inputTokens: 1_000_000, outputTokens: 500_000, cacheReadTokens: 2_000_000, cacheWriteTokens: 0,
+    inputTokens: 3_000_000, outputTokens: 500_000, cacheReadTokens: 2_000_000, cacheWriteTokens: 0,
     totalTokens: 3_500_000
   })];
   const pricing = { 'GLM-5.2': { inputPerM: 0.5, outputPerM: 2, cacheReadPerM: 0.05 } };
   const periods = zcode.collectZcodeUsage({ nowMs: now, pricing, deps: { readUsageRows: () => rows } });
-  // expected: 1M*0.5 + 0.5M*2 + 2M*0.05 = 0.5 + 1.0 + 0.1 = 1.6
+  // expected: 1M(fresh)*0.5 + 0.5M*2 + 2M*0.05 = 0.5 + 1.0 + 0.1 = 1.6
   assert.ok(Math.abs(periods.today.costUsd - 1.6) < 1e-6, `cost ${periods.today.costUsd} ~= 1.6`);
   assert.equal(periods.today.clientCosts.zcode, periods.today.costUsd);
   assert.equal(periods.today.modelCosts['GLM-5.2'], periods.today.costUsd);

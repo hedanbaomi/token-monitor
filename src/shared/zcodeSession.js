@@ -160,29 +160,41 @@ function normalizeModel(modelId) {
 // without this the GLM-5.2 etc. rows would always show $0 — unlike tokscale,
 // ZCode is read natively and never sees tokscale's pricing file. Returns 0 when
 // no pricing is configured for the model.
+//
+// IMPORTANT: ZCode's input_tokens is CACHE-INCLUSIVE (it already contains the
+// cache_read + cache_creation portions), mirroring upstream fix #68. So the
+// billable "fresh" input is input − cacheRead − cacheWrite; charging the raw
+// input plus a separate cacheRead rate would double-count the cached portion.
 function costForRow(row, model, pricing) {
   if (!pricing) return 0;
   const p = pricing[model];
   if (!p) return 0;
   const perM = 1e6;
+  const cacheRead = num(row.cacheReadTokens);
+  const cacheWrite = num(row.cacheWriteTokens);
+  const freshInput = Math.max(0, num(row.inputTokens) - cacheRead - cacheWrite);
   let cost = 0;
-  if (p.inputPerM) cost += (num(row.inputTokens) / perM) * p.inputPerM;
+  if (p.inputPerM) cost += (freshInput / perM) * p.inputPerM;
   if (p.outputPerM) cost += (num(row.outputTokens) / perM) * p.outputPerM;
-  if (p.cacheReadPerM) cost += (num(row.cacheReadTokens) / perM) * p.cacheReadPerM;
+  if (p.cacheReadPerM) cost += (cacheRead / perM) * p.cacheReadPerM;
   return cost;
 }
 
-// Accumulates a single usage row into a period, mirroring the additive logic in
-// usage.js extractUsageFromTokscale (input + output + cacheRead + cacheWrite
-// = total; reasoning is informational and already a subset of output).
+// Accumulates a single usage row into a period. NOTE: unlike most clients,
+// ZCode's input_tokens is CACHE-INCLUSIVE (upstream fix #68), so the canonical
+// total is input + output (the cache portion is already inside input and is
+// surfaced separately for the cache breakdown, NOT added again). We prefer the
+// row's computed_total_tokens when present; the fallback mirrors that rule.
 function addRowInto(period, row, sessionId, pricing) {
   const model = normalizeModel(row.model);
-  // Prefer the provider's total; fall back to the sum of components.
   const input = num(row.inputTokens);
   const output = num(row.outputTokens);
+  // Prefer the provider's total; fall back to input + output (ZCode's input is
+  // cache-inclusive, so do NOT add cacheRead/cacheWrite on top — that double-counts).
+  const total = num(row.totalTokens) || (input + output);
+  // cacheRead/cacheWrite are surfaced for the cache breakdown only (not in total).
   const cacheRead = num(row.cacheReadTokens);
   const cacheWrite = num(row.cacheWriteTokens);
-  const total = num(row.totalTokens) || (input + output + cacheRead + cacheWrite);
   // ZCode rows carry no cost; derive it from the custom-pricing map (if any).
   const cost = num(row.costUsd) || costForRow(row, model, pricing);
   if (total <= 0 && cost <= 0) return;
