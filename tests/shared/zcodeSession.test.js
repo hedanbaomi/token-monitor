@@ -238,3 +238,95 @@ maybeSqlite('dataDirPresent is true when a rollout dir has model-io files', () =
   assert.equal(zcode.dataDirPresent({ env: { ZCODE_HOME: fakeHome } }), true);
   assert.equal(zcode.dataDirPresent({ env: { ZCODE_HOME: path.join(os.tmpdir(), 'definitely-missing-zcode') } }), false);
 });
+
+// --- session detail (readSessionEvents) -------------------------------------
+// Build a synthetic db with turn_usage + input_history + tool_usage so we can
+// exercise the per-turn breakdown path without a real ZCode install.
+function makeZcodeSessionDb({ sessionId, turns = [], prompts = [], tools = [] }) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'zcodesess-'));
+  tmpDbDirs.push(tmp);
+  const file = path.join(tmp, 'db.sqlite');
+  const db = new sqlite.DatabaseSync(file);
+  db.exec(`CREATE TABLE turn_usage (
+    session_id TEXT, turn_id TEXT, user_message_id TEXT, started_at INTEGER, completed_at INTEGER,
+    input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
+    cache_creation_input_tokens INTEGER, cache_read_input_tokens INTEGER, computed_total_tokens INTEGER
+  )`);
+  db.exec(`CREATE TABLE input_history (id TEXT, session_id TEXT, text TEXT, time_created INTEGER)`);
+  db.exec(`CREATE TABLE tool_usage (id TEXT, session_id TEXT, turn_id TEXT, tool_name TEXT)`);
+
+  const insT = db.prepare(`INSERT INTO turn_usage (session_id, turn_id, user_message_id, started_at, completed_at, input_tokens, output_tokens, reasoning_tokens, cache_creation_input_tokens, cache_read_input_tokens, computed_total_tokens) VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+  turns.forEach((t) => insT.run(sessionId, t.turnId, t.userMessageId || null, t.startedAt, t.completedAt, t.input, t.output, t.reasoning || 0, t.cacheWrite || 0, t.cacheRead, t.total));
+
+  const insP = db.prepare(`INSERT INTO input_history (id, session_id, text, time_created) VALUES (?,?,?,?)`);
+  prompts.forEach((p, i) => insP.run('ih' + i, sessionId, p.text, p.ms));
+
+  const insTool = db.prepare(`INSERT INTO tool_usage (id, session_id, turn_id, tool_name) VALUES (?,?,?,?)`);
+  let ti = 0;
+  for (const t of tools) insTool.run('tu' + (ti++), sessionId, t.turnId, t.name);
+
+  db.close();
+  return { dir: tmp, file };
+}
+
+maybeSqlite('readSessionEvents returns found:false for an unknown session', () => {
+  const { dir } = makeZcodeSessionDb({ sessionId: 's1', turns: [] });
+  const fakeHome = stageZcodeHome(dir);
+  const r = zcode.readSessionEvents('s-other', { env: { ZCODE_HOME: fakeHome } });
+  assert.equal(r.found, false);
+  assert.equal(r.events.length, 0);
+});
+
+maybeSqlite('readSessionEvents emits prompt+turn events with prompt text from input_history', () => {
+  const t0 = Date.UTC(2026, 5, 20, 1, 0, 0);
+  const { dir } = makeZcodeSessionDb({
+    sessionId: 'sess-d',
+    prompts: [{ ms: t0 - 1, text: 'fix the bug' }],
+    turns: [{ turnId: 'turn-1', startedAt: t0, completedAt: t0 + 1000, input: 300, output: 50, cacheRead: 200, cacheWrite: 0, total: 350 }],
+    tools: [{ turnId: 'turn-1', name: 'Read' }, { turnId: 'turn-1', name: 'Bash' }]
+  });
+  const fakeHome = stageZcodeHome(dir);
+  const r = zcode.readSessionEvents('sess-d', { env: { ZCODE_HOME: fakeHome } });
+  assert.equal(r.found, true);
+  // prompt + turn = 2 events
+  assert.equal(r.events.length, 2);
+  assert.equal(r.events[0].kind, 'prompt');
+  assert.equal(r.events[0].text, 'fix the bug');
+  assert.equal(r.events[1].kind, 'turn');
+  // input is cache-inclusive: freshInput = 300 - 200 = 100
+  assert.equal(r.events[1].tokens.input, 100);
+  assert.equal(r.events[1].tokens.cacheRead, 200);
+  assert.equal(r.events[1].tokens.output, 50);
+  assert.deepEqual(r.events[1].tools.sort(), ['Bash', 'Read']);
+});
+
+maybeSqlite('readSessionEvents works with no input_history (prompts degrade gracefully)', () => {
+  const t0 = Date.UTC(2026, 5, 20, 1, 0, 0);
+  const { dir } = makeZcodeSessionDb({
+    sessionId: 'sess-e',
+    prompts: [],
+    turns: [{ turnId: 'turn-1', startedAt: t0, completedAt: t0 + 1000, input: 100, output: 10, cacheRead: 0, total: 110 }]
+  });
+  const fakeHome = stageZcodeHome(dir);
+  const r = zcode.readSessionEvents('sess-e', { env: { ZCODE_HOME: fakeHome } });
+  assert.equal(r.found, true);
+  assert.equal(r.events.length, 1); // just the turn, no prompt
+  assert.equal(r.events[0].kind, 'turn');
+});
+
+maybeSqlite('readSessionDetail wires zcode into grouped exchanges', () => {
+  const { readSessionDetail } = require('../../src/shared/sessionDetail');
+  const t0 = Date.UTC(2026, 5, 20, 1, 0, 0);
+  const { dir } = makeZcodeSessionDb({
+    sessionId: 'sess-f',
+    prompts: [{ ms: t0 - 1, text: 'hello' }],
+    turns: [{ turnId: 'turn-1', startedAt: t0, completedAt: t0 + 1000, input: 300, output: 50, cacheRead: 200, total: 350 }]
+  });
+  const fakeHome = stageZcodeHome(dir);
+  const r = readSessionDetail({ client: 'zcode', sessionId: 'sess-f', period: 'total', deps: { env: { ZCODE_HOME: fakeHome } } });
+  assert.equal(r.found, true);
+  assert.equal(r.client, 'zcode');
+  assert.equal(r.exchanges.length, 1);
+  assert.equal(r.exchanges[0].promptPreview, 'hello');
+  assert.equal(r.exchanges[0].turnCount, 1);
+});

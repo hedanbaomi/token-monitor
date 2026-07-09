@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const { resolveSessionFile } = require('./sessionFiles');
 const opencodeSession = require('./providers/opencode/session');
 const { readReasonixSessionEvents } = require('./providers/reasonix/sessionDetail');
+const zcodeSession = require('./zcodeSession');
 
 function num(value) {
   const n = Number(value);
@@ -390,9 +391,22 @@ function readReasonixSessionDetail({ sessionId, period = 'total', home, deps = {
   };
 }
 
+// ZCode reads per-turn usage from its own SQLite store (tokscale has no ZCode
+// transcript path), so — like OpenCode — its session detail comes from a native
+// read rather than a JSONL transcript. sessionCost is 0 (ZCode stores none).
+function readZcodeSessionDetail({ sessionId, period = 'total', deps = {} }) {
+  const { found, events, sessionCost } = zcodeSession.readSessionEvents(sessionId, deps);
+  if (!found) return { found: false, client: 'zcode', sessionId, period, exchanges: [], totals: totalsOf([], sessionCost) };
+  const now = new Date((deps.now || Date.now)());
+  const grouped = sumRealCost(filterExchangesByPeriod(groupEvents(events), period, now));
+  const filteredCost = grouped.reduce((acc, ex) => acc + num(ex.costEstimate), 0);
+  return { found: true, client: 'zcode', sessionId, period, exchanges: grouped, totals: totalsOf(grouped, filteredCost) };
+}
+
 function readSessionDetail({ client, sessionId, period = 'total', sessionCost = 0, home, env, useEnvRoots, deps = {} }) {
   if (client === 'opencode') return readOpenCodeSessionDetail({ sessionId, period, deps });
   if (client === 'reasonix') return readReasonixSessionDetail({ sessionId, period, home, deps });
+  if (client === 'zcode') return readZcodeSessionDetail({ sessionId, period, deps });
   const filePath = resolveSessionFile(client, sessionId, home, { env, useEnvRoots });
   if (!filePath) return { found: false, client, sessionId, period, exchanges: [], totals: totalsOf([], sessionCost) };
   let text;

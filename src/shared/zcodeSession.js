@@ -277,11 +277,9 @@ const MODEL_USAGE_SQL =
    WHERE completed_at IS NOT NULL`;
 
 function rowFromDbRecord(r) {
-  // ZCode's input_tokens already EXCLUDES cache_read (it is the bare prompt
-  // size), and cache_read_input_tokens / cache_creation_input_tokens are
-  // reported separately — same convention as Claude/OpenCode. exposeTotal in
-  // usage.js sums input + output + cacheRead + cacheWrite, so feed those
-  // components directly; cache_creation maps to cacheWrite.
+  // ZCode's input_tokens is CACHE-INCLUSIVE (it contains cache_read + cache_creation),
+  // per upstream fix #68. We surface the raw components and let addRowInto / costForRow
+  // treat the total as input + output (cache not re-added) — see those functions.
   const cacheWrite = num(r.cacheCreationTokens);
   return {
     client: ZCODE_CLIENT,
@@ -403,12 +401,125 @@ function collectZcodeUsage(options = {}) {
   return { today, month, allTime };
 }
 
+// ---------------------------------------------------------------------------
+// Session detail (per-turn breakdown for the "Sessions" panel)
+// ---------------------------------------------------------------------------
+// Mirrors opencodeSession.readSessionEvents: returns a neutral {found, events,
+// sessionCost} that sessionDetail.js groups into exchanges. Each turn_usage row
+// is one user→assistant exchange (ZCode aggregates the per-model-call rows of a
+// turn into one turn_usage record), so we emit:
+//   - a 'prompt' event (from input_history.text, matched by time to the turn)
+//   - a 'turn'  event (from turn_usage tokens + tool_usage names)
+// in chronological order. sessionCost is 0 (ZCode stores no cost).
+
+const TURN_USAGE_SQL =
+  `SELECT turn_id,
+          user_message_id,
+          started_at   AS startedAt,
+          completed_at AS completedAt,
+          input_tokens AS inputTokens,
+          output_tokens AS outputTokens,
+          reasoning_tokens AS reasoningTokens,
+          cache_creation_input_tokens AS cacheCreationTokens,
+          cache_read_input_tokens AS cacheReadTokens,
+          computed_total_tokens AS totalTokens
+   FROM turn_usage
+   WHERE session_id = ? AND completed_at IS NOT NULL
+   ORDER BY completed_at ASC`;
+
+const INPUT_HISTORY_SQL =
+  `SELECT text, time_created AS timeCreated
+   FROM input_history
+   WHERE session_id = ?
+   ORDER BY time_created ASC`;
+
+const TOOLS_FOR_TURN_SQL =
+  `SELECT DISTINCT tool_name AS tool
+   FROM tool_usage
+   WHERE session_id = ? AND turn_id = ? AND tool_name IS NOT NULL`;
+
+function cleanPrompt(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function readSessionEvents(sessionId, deps = {}) {
+  const empty = { found: false, events: [], sessionCost: 0 };
+  const id = String(sessionId || '');
+  if (!id) return empty;
+  const sqliteMod = resolveSqlite(deps);
+  if (!sqliteMod) return empty;
+
+  for (const dbPath of discoverDbPaths(deps)) {
+    let db;
+    try {
+      db = openDb(dbPath, sqliteMod);
+      const hasTurns = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='turn_usage'").get();
+      if (!hasTurns) continue;
+      const turns = db.prepare(TURN_USAGE_SQL).all(id);
+      if (turns.length === 0) continue;
+
+      // Pull the prompt history once and pair each turn with the most recent
+      // prompt at-or-before the turn's startedAt (nearest preceding user input).
+      // input_history is optional (older ZCode builds lack it) → prompts degrade
+      // gracefully to an empty boundary.
+      let prompts = [];
+      try { prompts = db.prepare(INPUT_HISTORY_SQL).all(id); } catch (_) { prompts = []; }
+      const promptMsText = prompts
+        .map((p) => ({ ms: num(p.timeCreated), text: cleanPrompt(p.text) }))
+        .filter((p) => p.ms > 0);
+
+      const events = [];
+      for (const t of turns) {
+        const startedMs = num(t.startedAt) || num(t.completedAt);
+        const timestamp = isoFromMs(startedMs);
+        // nearest preceding prompt
+        let promptText = '';
+        for (const p of promptMsText) {
+          if (p.ms <= startedMs) promptText = p.text;
+          else break;
+        }
+        if (promptText) events.push({ kind: 'prompt', timestamp, text: promptText });
+
+        const cacheRead = num(t.cacheReadTokens);
+        const cacheWrite = num(t.cacheCreationTokens);
+        // ZCode's input_tokens is cache-inclusive (see addRowInto), so the
+        // session-detail total must be input + output, NOT + cacheRead/cacheWrite.
+        // makeTokens in sessionDetail.js sums input+output+cacheRead+cacheWrite,
+        // so feed it a disjoint fresh input (input − cacheRead − cacheWrite) to
+        // avoid double-counting the cached portion — same fix as #68.
+        const freshInput = Math.max(0, num(t.inputTokens) - cacheRead - cacheWrite);
+        let tools = [];
+        try { tools = db.prepare(TOOLS_FOR_TURN_SQL).all(id, t.turn_id).map((r) => r.tool).filter(Boolean); } catch (_) {}
+        events.push({
+          kind: 'turn',
+          timestamp: isoFromMs(num(t.completedAt)) || timestamp,
+          tokens: {
+            input: freshInput,
+            output: num(t.outputTokens),
+            cacheRead,
+            cacheWrite,
+            reasoning: num(t.reasoningTokens),
+            total: num(t.totalTokens) || (num(t.inputTokens) + num(t.outputTokens))
+          },
+          tools: Array.from(new Set(tools)),
+          cost: 0
+        });
+      }
+      return { found: true, events, sessionCost: 0 };
+    } catch (_) { /* skip unreadable db */ } finally {
+      if (db) { try { db.close(); } catch (_) {} }
+    }
+  }
+  return empty;
+}
+
 module.exports = {
   ZCODE_CLIENT,
   collectZcodeUsage,
   dataDirPresent,
   discoverDbPaths,
   discoverRolloutFiles,
+  readSessionEvents,
   readUsageRows,
   readUsageRowsFromDb,
   readUsageRowsFromRollout,
