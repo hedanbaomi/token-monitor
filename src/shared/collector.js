@@ -1044,6 +1044,15 @@ async function collectHistoryOnce(options) {
     rawGraphs.push(options.qoderCnGraph);
     histories.push(normalizeHistory(parseGraphResult(options.qoderCnGraph), { capDays, todayKey }));
   }
+  // Cowork is read natively (tokscale's graph never sees the Cowork sandbox), so
+  // fold its daily breakdown into the history too — otherwise the dashboard's
+  // lifetime total undercounts vs. the homepage period total. Folded into
+  // rawGraphs as well so the daily-history archive (which retains history across
+  // source cleanup) covers Cowork alongside the tokscale + Proma graphs.
+  if (options.coworkGraph) {
+    rawGraphs.push(options.coworkGraph);
+    histories.push(normalizeHistory(parseGraphResult(options.coworkGraph), { capDays, todayKey }));
+  }
   if (options.dailyHistoryArchiveEnabled) {
     try {
       const retainedGraph = retainDailyHistory(rawGraphs, {
@@ -1600,6 +1609,9 @@ async function collectUsageOnce(options) {
       clients: tokscaleClients,
       promaGraph: includesProma ? buildPromaHistoryGraph({ rows: promaRows || collectPromaRows(), pricingByModel: promaPricing || {} }) : null,
       qoderCnGraph: historyQoderCnGraph || null,
+      coworkGraph: coworkEnabled(normalizedClients) && coworkSession.dataDirPresent({})
+        ? coworkSession.buildCoworkHistoryGraph({ allTimeSince })
+        : null,
       historyEnabled: options.historyEnabled,
       commandTimeoutMs: options.historyTimeoutMs,
       capDays: options.historyCapDays,

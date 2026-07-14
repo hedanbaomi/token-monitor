@@ -1,0 +1,108 @@
+# 交接文档 — ZCode + Cowork 监测集成
+
+> 本文档记录了在 token-monitor（github.com/Javis603/token-monitor）基础上所做的全部修改，供后续 agent 接手。
+> 基线版本：上游 main（v0.27.0+）。所有改动在本地分支 `feature/zcode-cowork-support`，**未 push**。
+
+## 一、总体目标
+
+为 token-monitor 增加 **ZCode**（智谱 ZCode CLI）和 **Claude Cowork**（Claude Desktop 桌面应用的 agent 功能）两个 AI 工具的 token 监测支持。两者都是上游 tokscale 无法正确扫描的客户端，因此采用**原生读取**方案（直接读本地数据库/JSONL，绕过 tokscale）。
+
+## 二、ZCode 的本地数据位置（关键）
+
+ZCode 把 token 数据存在 CLI 运行时数据库里，**不是** `~/.zcode/projects`（上游 tokscale 假设的路径，ZCode 从不写那里）：
+
+| 路径 | 内容 | 是否采用 |
+|---|---|---|
+| `%USERPROFILE%\.zcode\cli\db\db.sqlite` | `model_usage` 表（权威）：每条 LLM 调用的 input/output/cacheRead/cacheCreate/total + provider/model/session/timestamp | ✅ **主源** |
+| `%USERPROFILE%\.zcode\cli\rollout\model-io-sess_*.jsonl` | 每次 LLM 调用一行 JSON，`response.usage` 块 | ✅ 备用源 |
+| `%USERPROFILE%\.zcode\cli\log\zcode-*.jsonl` | 结构化日志，token 值被 `[Redacted]` | ❌ 不可用 |
+| `%USERPROFILE%\.zcode\v2\` | Electron 端会话（只存 characterCount） | ❌ 无 token |
+
+**重要数据约定**：ZCode 的 `input_tokens` 是 **cache-inclusive** 的（已包含 cache_read + cache_creation 部分，对应上游 fix #68）。因此：
+- 总量 = `input + output`（不要再加 cacheRead/cacheWrite）
+- 计费用的"净输入" = `input - cacheRead - cacheWrite`
+
+### ZCode DB 关键表
+- `model_usage`：每条 LLM 调用的 token 明细（`session_id`, `model_id`, `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `computed_total_tokens`, `completed_at`）
+- `turn_usage`：每个 user→assistant 交换的聚合 token（会话详情用）
+- `input_history`：用户提问原文 `text`（会话详情的 prompt 来源）
+- `tool_usage`：每轮用到的工具名（会话详情用）
+- `session`：`directory` 列 = 工作区路径（**项目归因**用）
+
+## 三、Cowork 的本地数据位置
+
+Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Claude Code，写标准 Claude Code JSONL：
+```
+%LOCALAPPDATA%\Packages\Claude_<publisher>\LocalCache\Roaming\Claude\
+  local-agent-mode-sessions\<session>\<workspace>\local_<vm>\…\
+    .claude\projects\<encoded>\<id>.jsonl   ← 标准 Claude 格式（type:"assistant" + message.usage）
+    audit.jsonl                              ← 最新的实时流
+```
+- 格式与 Claude Code 完全一致（`input_tokens`/`output_tokens`/`cache_creation_input_tokens`/`cache_read_input_tokens`）
+- **Cowork 的 token 归到 `claude` 客户端**（不单独显示 cowork 行），这样 Claude Code + Cowork 合并成一个 claude 工具行 + 一个 claude-opus 模型行
+
+## 四、修改/新增的文件清单
+
+### 新增文件
+| 文件 | 作用 |
+|---|---|
+| `src/shared/zcodeSession.js` | **ZCode 适配器**：读 `db.sqlite` 的 `model_usage`（JSONL 兜底），输出标准 period 结构；含 cache-inclusive 修正、自定义单价算成本、`loadSessionProjects`（项目归因）、`readSessionEvents`（会话详情） |
+| `src/shared/coworkSession.js` | **Cowork 适配器**：动态发现 MSIX 沙盒路径，读所有 `*.jsonl`，解析 assistant 行的 usage；归到 `claude` 客户端 |
+| `tests/shared/zcodeSession.test.js` | ZCode 单测（周期分桶/成本/项目归因/会话详情/JSONL 兜底） |
+| `tests/shared/coworkSession.test.js` | Cowork 单测（归到 claude/模型合并/成本） |
+| `launch-background.vbs` | Windows 后台静默启动脚本（无 cmd 黑窗） |
+| `install-autostart.bat` / `uninstall-autostart.bat` | 开机自启安装/卸载 |
+| `assets/icons/zcode.svg` / `site/assets/icons/zcode.svg` | ZCode 图标（复用 zai.svg） |
+| `HANDOFF.md` | 本文档 |
+
+### 修改文件（核心改动）
+| 文件 | 改动 |
+|---|---|
+| `src/shared/collector.js` | ① `NATIVE_ONLY_CLIENTS = {zcode, proma}` + `tokscaleClientsCsv()`：从 tokscale CSV 剔除原生客户端 ② `collectUsageOnce` 中 tokscale 扫描包 **try/catch**（tokscale 失败不再连累原生读取）③ `enabledZcode`/`coworkEnabled`/`zcodePricingMap` 辅助 ④ `clientWatchCandidates` 加 zcode(`~/.zcode/cli/db`+`rollout`) 和 cowork 监听路径 ⑤ `collectUsageOnce` 在 tokscale+WSL 后 merge zcode 和 cowork 用量 |
+| `src/shared/sessionDetail.js` | 新增 `readZcodeSessionDetail` 分支 + `readSessionDetail` 的 `if (client === 'zcode')` 分发 |
+| `src/shared/clientTracking.js` | `DEFAULT_CLIENTS` 加 `zcode`（cowork 不加，归 claude） |
+| `src/shared/usage.js` | `normalizeClientName` 加 `zcode`/`z-code` 归一化 |
+| `src/electron/renderer/app.js` | `KNOWN_CLIENTS`/`clientLabels`/`clientsWithIcon` 加 zcode；**会话点击白名单**加 `'zcode'`（否则点不开） |
+| `src/electron/main.js` | 两处 `startCollector` 加 `customModelPricing: () => settings.customModelPricing \|\| []`（函数式 getter，改单价立即生效） |
+| `package.json` | `check` 脚本注册新文件 |
+
+## 五、关键设计决策与坑
+
+1. **zcode 走原生，不走 tokscale**：tokscale 的 zcode 实现路径（`~/.zcode/projects`）是错的，ZCode 不写那里。原生读 `~/.zcode/cli/db` 才有数据。
+2. **cowork 归到 claude**：避免出现"opus(code)"和"opus(cowork)"分开显示。无重复计数（tokscale 读 `~/.claude/projects`，cowork 读沙盒路径，磁盘不重叠）。
+3. **cache-inclusive 修正**（#68）：ZCode input_tokens 含缓存，总量 = input+output，净输入 = input-cacheRead-cacheWrite。不修会**翻倍**。
+4. **tokscale try/catch**：tokscale 卡住/失败时（尤其 watch tick 的 `--today`），不能让整个 tick reject 抹掉原生数据，否则仪表盘闪烁 active↔waiting。
+5. **会话点击白名单**：`app.js` 的 `els.breakdown.addEventListener('click')` 有硬编码 `client !== 'claude' && !== 'codex' && !== 'opencode'`，必须加 `'zcode'` 才能点开会话详情。
+6. **项目归因**：ZCode 会话需要 `projectId`/`projectLabel` 才能进「项目」视图；从 `session.directory` 用 `hashKey`+`normalizeProjectPath` 算（复刻 collector.js 的 `projectIdentity`，避免循环依赖）。
+
+## 六、更新维护流程（rebase）
+
+上游频繁更新。维护方式：
+1. `git fetch origin`
+2. `git rebase origin/main`
+3. 解决冲突（主要在 `collector.js` 的 `clientWatchCandidates` 和 `collectUsageOnce` 区域；`clientTracking.js` 的 DEFAULT_CLIENTS；`app.js` 的 KNOWN_CLIENTS；`main.js` 的 startCollector）
+4. 冲突解决原则：**双方特性都保留**。上游新客户端加进 DEFAULT_CLIENTS/KNOWN_CLIENTS，我们的 zcode 保留；collector 里上游的新结构（Proma/projects/onProgress/collectedAt）采用，套进我们的 tokscaleClientsCsv+try/catch。
+5. `npm install`（tokscale 版本升级时）；`npm run check` + `npx eslint src/shared/zcodeSession.js src/shared/coworkSession.js` + `node --test tests/shared/zcodeSession.test.js tests/shared/coworkSession.test.js`
+6. 删除每次 rebase 会误提交的 `_resolve_pkg.js` 调试文件
+
+## 七、已知未解决问题
+
+### 趋势主页（7.1B）与使用仪表盘（5B）token 不一致
+- **主页**读 `stats.periods.allTime.totalTokens`（live 周期扫描 + zcode/cowork 原生合并）
+- **仪表盘**读 `history.summary.totalTokens`（tokscale graph 历史）
+- 两者数据源不同。cowork（~350M，归 claude）**不在 graph 里**（tokscale 看不到 cowork），导致仪表盘少算。graph 用 `--client` 传全部客户端（含 zcode，tokscale 4.5+ 已支持 zcode）。
+- 待解决：让仪表盘的历史也包含 cowork 贡献，或统一两个视图的数据源。
+
+## 八、验证命令速查
+```cmd
+:: 语法检查
+npm run check
+:: lint 我们的文件
+npx eslint src/shared/zcodeSession.js src/shared/coworkSession.js src/shared/collector.js src/electron/renderer/app.js src/electron/main.js
+:: 测试
+node --test tests/shared/zcodeSession.test.js tests/shared/coworkSession.test.js tests/shared/sessionDetail.test.js
+:: 真实数据验证（zcode）
+node -e "const z=require('./src/shared/zcodeSession'); const p=z.collectZcodeUsage({allTimeSince:'2025-01-01'}); console.log(p.allTime.totalTokens, p.allTime.clients);"
+:: 启动
+npm run dev   :: 或双击 launch-background.vbs
+```

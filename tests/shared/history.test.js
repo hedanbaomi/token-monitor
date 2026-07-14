@@ -46,6 +46,26 @@ test('sumTokens adds disjoint Tokscale reasoning only for opted-in clients', () 
   assert.equal(sumTokens(null), 0);
 });
 
+test('sumTokens recognizes alias key names from tokscale graph output', () => {
+  // snake_case aliases
+  assert.equal(sumTokens({ input_tokens: 10, output_tokens: 20, cache_read_tokens: 100, cache_write_tokens: 5 }), 135);
+  // promptTokens / completionTokens
+  assert.equal(sumTokens({ promptTokens: 10, completionTokens: 20, cachedTokens: 100, cache_creation_input_tokens: 5 }), 135);
+  // totalInput / totalOutput / totalCacheRead / totalCacheWrite
+  assert.equal(sumTokens({ totalInput: 10, totalOutput: 20, totalCacheRead: 100, totalCacheWrite: 5 }), 135);
+});
+
+test('sumTokens prefers a direct total key over component keys', () => {
+  assert.equal(sumTokens({ totalTokens: 999, input: 10, output: 20 }), 999);
+  assert.equal(sumTokens({ total_tokens: 999, input_tokens: 10, output_tokens: 20 }), 999);
+  assert.equal(sumTokens({ tokenCount: 42 }), 42);
+});
+
+test('sumTokens skips zero-valued direct keys and falls back to components', () => {
+  // totalTokens=0 should not short-circuit; component sum should be used
+  assert.equal(sumTokens({ totalTokens: 0, input: 10, output: 20 }), 30);
+});
+
 const SAMPLE = {
   summary: { totalTokens: 1, clients: ['claude', 'codex'], models: [] },
   contributions: [

@@ -292,8 +292,47 @@ function collectCoworkUsage(options = {}) {
   return { today, month, allTime };
 }
 
+// Build a tokscale-graph-shaped {contributions, timeMetrics} from Cowork's
+// transcripts, so the dashboard's trends/history (which reads tokscale graph)
+// can include Cowork's contribution. tokscale's graph never sees Cowork (it
+// scans ~/.claude/projects, not the Cowork sandbox), so without this the
+// dashboard's lifetime total undercounts vs. the homepage period total.
+// Each contribution row is one day; Cowork is attributed to the `claude`
+// client (matching collectCoworkUsage) so it merges into Claude's stack.
+function buildCoworkHistoryGraph(options = {}) {
+  const deps = options.deps || {};
+  const allTimeSinceMs = msFromIso(options.allTimeSince || '2024-01-01') || Date.UTC(2024, 0, 1);
+  const rows = (deps.readUsageRows || readUsageRows)(deps);
+  const byDay = new Map(); // 'YYYY-MM-DD' -> { tokens, cost }
+  for (const row of rows) {
+    const ts = row.completedAtMs || msFromIso(row.timestamp);
+    if (!ts || ts < allTimeSinceMs) continue;
+    const input = num(row.inputTokens);
+    const output = num(row.outputTokens);
+    const total = input + output; // cache-inclusive input (see addRowInto)
+    if (total <= 0) continue;
+    const day = new Date(ts).toISOString().slice(0, 10);
+    let d = byDay.get(day);
+    if (!d) { d = { tokens: 0, cost: 0 }; byDay.set(day, d); }
+    d.tokens += total;
+    d.cost += num(row.costUsd);
+  }
+  const contributions = [];
+  for (const [date, d] of byDay) {
+    contributions.push({
+      date,
+      totals: { tokens: d.tokens, cost: d.cost },
+      tokenBreakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      clients: [{ client: 'claude', modelId: 'cowork', tokens: { totalTokens: d.tokens }, cost: d.cost, messages: 0 }]
+    });
+  }
+  contributions.sort((a, b) => a.date < b.date ? -1 : 1);
+  return { contributions };
+}
+
 module.exports = {
   COWORK_CLIENT,
+  buildCoworkHistoryGraph,
   collectCoworkUsage,
   dataDirPresent,
   discoverTranscriptFiles,

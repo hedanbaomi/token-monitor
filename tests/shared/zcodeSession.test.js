@@ -15,8 +15,6 @@ try { sqlite = require('node:sqlite'); } catch (_) { sqlite = null; }
 
 const zcode = require('../../src/shared/zcodeSession');
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
 function row(overrides = {}) {
   return Object.assign({
     client: 'zcode',

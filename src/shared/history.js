@@ -54,16 +54,42 @@ function hasDisjointReasoning(client) {
   return TOKSCALE_DISJOINT_REASONING_CLIENTS.has(String(client).trim().toLowerCase());
 }
 
+// Additive token components. Existing clients expose reasoning inside `output`,
+// but Reasonix emits it as a disjoint component.
+// The key aliases mirror TOKEN_COMPONENT_KEYS in usage.js so native graphs
+// (Cowork emits `{ totalTokens }` without component keys) and tokscale graph
+// aliases still count — a mismatch here caused the dashboard lifetime total
+// to undercount vs. the homepage TOTAL.
+const SUM_DIRECT_KEYS = ['totalTokens', 'total_tokens', 'totalTokenCount', 'total_token_count', 'tokenCount', 'token_count'];
+const SUM_INPUT_KEYS = ['input', 'inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens', 'totalInput'];
+const SUM_OUTPUT_KEYS = ['output', 'outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens', 'totalOutput'];
+const SUM_CACHE_READ_KEYS = ['cacheRead', 'cacheReadTokens', 'cache_read_tokens', 'cachedTokens', 'cached_tokens', 'cacheReadInputTokens', 'cache_read_input_tokens', 'totalCacheRead'];
+const SUM_CACHE_WRITE_KEYS = ['cacheWrite', 'cacheWriteTokens', 'cache_write_tokens', 'cacheCreationInputTokens', 'cache_creation_input_tokens', 'totalCacheWrite'];
+
+function firstNum(obj, keys) {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      const v = num(obj[key]);
+      if (v !== 0) return v;
+    }
+  }
+  return 0;
+}
+
 function sumTokens(breakdown, client = '') {
   if (!breakdown || typeof breakdown !== 'object') return 0;
-  return num(breakdown.input) + num(breakdown.output)
-    + num(breakdown.cacheRead) + num(breakdown.cacheWrite)
+  const direct = firstNum(breakdown, SUM_DIRECT_KEYS);
+  if (direct !== 0) return direct;
+  return firstNum(breakdown, SUM_INPUT_KEYS)
+    + firstNum(breakdown, SUM_OUTPUT_KEYS)
+    + firstNum(breakdown, SUM_CACHE_READ_KEYS)
+    + firstNum(breakdown, SUM_CACHE_WRITE_KEYS)
     + (hasDisjointReasoning(client) ? num(breakdown.reasoning) : 0);
 }
 
 function sumOutputTokens(breakdown, client = '') {
   if (!breakdown || typeof breakdown !== 'object') return 0;
-  return num(breakdown.output)
+  return firstNum(breakdown, SUM_OUTPUT_KEYS)
     + (hasDisjointReasoning(client) ? num(breakdown.reasoning) : 0);
 }
 
@@ -98,7 +124,6 @@ function applyComponentSummary(summary, totalTokens, perClient, perModel) {
     models[key] = components;
   }
   return { totals, clients, models };
-}
 
 // Folds tokscale `graph` output (contributions[].clients[]) into a per-day shape where a
 // day's total always equals the sum of its perClient and perModel stacks.
