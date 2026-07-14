@@ -307,9 +307,14 @@ function buildCoworkHistoryGraph(options = {}) {
   for (const row of rows) {
     const ts = row.completedAtMs || msFromIso(row.timestamp);
     if (!ts || ts < allTimeSinceMs) continue;
+    // Cowork is standard Claude format (input EXCLUDES cache), so the total is
+    // input + output + cacheRead + cacheWrite — matching addRowInto above. Do NOT
+    // apply the zcode cache-inclusive shortcut here (that undercounts by ~all the cache).
     const input = num(row.inputTokens);
     const output = num(row.outputTokens);
-    const total = input + output; // cache-inclusive input (see addRowInto)
+    const cacheRead = num(row.cacheReadTokens);
+    const cacheWrite = num(row.cacheWriteTokens);
+    const total = input + output + cacheRead + cacheWrite;
     if (total <= 0) continue;
     const day = new Date(ts).toISOString().slice(0, 10);
     let d = byDay.get(day);
