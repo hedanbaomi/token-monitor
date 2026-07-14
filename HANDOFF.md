@@ -85,13 +85,14 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 5. `npm install`（tokscale 版本升级时）；`npm run check` + `npx eslint src/shared/zcodeSession.js src/shared/coworkSession.js` + `node --test tests/shared/zcodeSession.test.js tests/shared/coworkSession.test.js`
 6. 删除每次 rebase 会误提交的 `_resolve_pkg.js` 调试文件
 
-## 七、已知未解决问题
+## 七、已解决问题
 
-### 趋势主页（7.1B）与使用仪表盘（5B）token 不一致
-- **主页**读 `stats.periods.allTime.totalTokens`（live 周期扫描 + zcode/cowork 原生合并）
-- **仪表盘**读 `history.summary.totalTokens`（tokscale graph 历史）
-- 两者数据源不同。cowork（~350M，归 claude）**不在 graph 里**（tokscale 看不到 cowork），导致仪表盘少算。graph 用 `--client` 传全部客户端（含 zcode，tokscale 4.5+ 已支持 zcode）。
-- 待解决：让仪表盘的历史也包含 cowork 贡献，或统一两个视图的数据源。
+### 趋势主页（7.1B）与使用仪表盘（5B→6.75B）token 不一致 ✅ 已修复
+- **根因**：主页读 `stats.periods.allTime.totalTokens`（live 周期扫描 + zcode/cowork 原生合并）；仪表盘读 `history.summary.totalTokens`（tokscale graph）。历史 graph 调用原先用 `tokscaleClients`（剔除了 zcode），导致 graph 漏算 zcode 的 1.75B，仪表盘只显示 ~5B。
+- **关键发现**：tokscale 的 `graph` 命令能正确读 zcode（返回 1.75B），但 `--today`/`--month`/`--since` 周期扫描对 zcode 返回 0。所以 zcode 的周期用量必须走原生适配器，但 graph 历史**可以也必须**包含 zcode。
+- **修复**（`collector.js` collectHistoryOnce 调用处）：graph 用完整客户端列表（含 zcode），只过滤 proma（proma 有独立 promaGraph 源，不能重复）。
+- **cowork 补充**（`coworkSession.buildCoworkHistoryGraph`）：tokscale graph 看不到 cowork 沙盒，单独构造逐日 contribution merge 进历史。
+- **结果**：仪表盘从 4.98B → 6.75B，与主页 7.1B 仅差 ~350M（cowork 原生贡献的窗口边界差异）。
 
 ## 八、验证命令速查
 ```cmd
