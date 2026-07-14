@@ -26,6 +26,28 @@ try { sqlite = require('node:sqlite'); } catch (_) { sqlite = null; }
 
 const ZCODE_CLIENT = 'zcode';
 
+// Stable project identity from a workspace path — mirrors collector.js's
+// normalizeProjectPath + projectIdentity (kept local to avoid a circular require
+// on collector.js, which requires this module). Uses hashKey for the id.
+const { hashKey } = require('./hashKey');
+function normalizeProjectPath(value) {
+  let normalized = String(value || '').trim().replace(/\\/g, '/');
+  if (!normalized) return '';
+  const windows = /^[a-z]:\//i.test(normalized) || normalized.startsWith('//');
+  const root = normalized === '/' || /^[a-z]:\/$/i.test(normalized);
+  if (!root) normalized = normalized.replace(/\/+$/, '');
+  return windows ? normalized.toLowerCase() : normalized;
+}
+function projectIdentityFromPath(value) {
+  const normalized = normalizeProjectPath(value);
+  if (!normalized) return {};
+  const root = normalized === '/' || /^[a-z]:\/$/i.test(normalized);
+  let displayPath = String(value || '').trim().replace(/\\/g, '/');
+  if (!root) displayPath = displayPath.replace(/\/+$/, '');
+  const label = root ? (normalized === '/' ? '/' : `${normalized[0].toUpperCase()}:\\`) : displayPath.split('/').pop();
+  return { projectId: hashKey('project', normalized), projectLabel: label };
+}
+
 // ---------------------------------------------------------------------------
 // Path discovery
 // ---------------------------------------------------------------------------
@@ -185,7 +207,7 @@ function costForRow(row, model, pricing) {
 // total is input + output (the cache portion is already inside input and is
 // surfaced separately for the cache breakdown, NOT added again). We prefer the
 // row's computed_total_tokens when present; the fallback mirrors that rule.
-function addRowInto(period, row, sessionId, pricing) {
+function addRowInto(period, row, sessionId, pricing, projectMap) {
   const model = normalizeModel(row.model);
   const input = num(row.inputTokens);
   const output = num(row.outputTokens);
@@ -223,7 +245,9 @@ function addRowInto(period, row, sessionId, pricing) {
   if (cost > 0) period.clientModelCosts[ZCODE_CLIENT][model] = (period.clientModelCosts[ZCODE_CLIENT][model] || 0) + cost;
 
   const key = `${ZCODE_CLIENT}:${sessionId}`;
-  const session = period.sessions[key] || {
+  const existing = period.sessions[key];
+  const project = projectMap ? projectMap.get(sessionId) : null;
+  const session = existing || {
     client: ZCODE_CLIENT,
     sessionId,
     totalTokens: 0,
@@ -238,7 +262,9 @@ function addRowInto(period, row, sessionId, pricing) {
     lastUsedAt: row.timestamp || '',
     models: {},
     modelCosts: {},
-    providers: {}
+    providers: {},
+    projectId: project ? project.projectId : '',
+    projectLabel: project ? project.projectLabel : ''
   };
   session.totalTokens += total;
   session.costUsd += cost;
@@ -366,6 +392,35 @@ function readUsageRows(deps = {}) {
   return readRollout(deps);
 }
 
+// Read the per-session workspace directory from ZCode's `session` table and map
+// each session_id to a stable {projectId, projectLabel} (mirrors how Claude/Codex
+// derive project identity from their transcript cwd). The rollout JSONL fallback
+// path has no session table, so it returns an empty map (sessions there get no
+// project — same as a Claude transcript with no cwd line).
+const SESSION_PROJECTS_SQL = `SELECT id, directory FROM session WHERE directory IS NOT NULL AND directory != ''`;
+function loadSessionProjects(deps = {}) {
+  const sqliteMod = resolveSqlite(deps);
+  if (!sqliteMod) return new Map();
+  const out = new Map();
+  for (const dbPath of discoverDbPaths(deps)) {
+    let db;
+    try {
+      db = openDb(dbPath, sqliteMod);
+      const hasTable = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session'").get();
+      if (!hasTable) continue;
+      for (const r of db.prepare(SESSION_PROJECTS_SQL).all()) {
+        const id = String(r.id || '');
+        if (!id || out.has(id)) continue;
+        const identity = projectIdentityFromPath(r.directory);
+        if (identity.projectId) out.set(id, identity);
+      }
+    } catch (_) { /* skip unreadable db */ } finally {
+      if (db) { try { db.close(); } catch (_) {} }
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Public API: build today / month / allTime periods
 // ---------------------------------------------------------------------------
@@ -389,14 +444,19 @@ function collectZcodeUsage(options = {}) {
   const day = utcDayBoundsMs(nowMs);
   const mon = utcMonthBoundsMs(nowMs);
 
+  // Map session_id -> {projectId, projectLabel} from ZCode's `session` table
+  // (directory column = workspace path). Lets ZCode sessions appear in the
+  // Projects view alongside Claude/Codex/OpenCode. Injectable via deps for tests.
+  const projectMap = deps.loadSessionProjects ? deps.loadSessionProjects(deps) : loadSessionProjects(deps);
+
   const rows = (deps.readUsageRows || readUsageRows)(deps);
   for (const row of rows) {
     const ts = row.completedAtMs || msFromIso(row.timestamp);
     if (!ts) continue;
     const sid = row.sessionId || 'zcode-session';
-    if (ts >= day.startMs && ts < day.endMs) addRowInto(today, row, sid, pricing);
-    if (ts >= mon.startMs && ts < mon.endMs) addRowInto(month, row, sid, pricing);
-    if (ts >= allTimeSinceMs) addRowInto(allTime, row, sid, pricing);
+    if (ts >= day.startMs && ts < day.endMs) addRowInto(today, row, sid, pricing, projectMap);
+    if (ts >= mon.startMs && ts < mon.endMs) addRowInto(month, row, sid, pricing, projectMap);
+    if (ts >= allTimeSinceMs) addRowInto(allTime, row, sid, pricing, projectMap);
   }
   return { today, month, allTime };
 }
@@ -519,6 +579,7 @@ module.exports = {
   dataDirPresent,
   discoverDbPaths,
   discoverRolloutFiles,
+  loadSessionProjects,
   readSessionEvents,
   readUsageRows,
   readUsageRowsFromDb,

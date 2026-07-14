@@ -105,6 +105,32 @@ test('allTimeSince excludes rows older than the anchor', () => {
   assert.equal(periods.allTime.totalTokens, 0);
 });
 
+// --- project attribution (Projects view) ------------------------------------
+test('collectZcodeUsage stamps projectId/projectLabel from the session project map', () => {
+  const now = Date.UTC(2026, 5, 20, 12, 0, 0);
+  const ts = new Date(Date.UTC(2026, 5, 20, 1, 0, 0)).toISOString();
+  const rows = [row({ completedAtMs: Date.parse(ts), timestamp: ts, sessionId: 'sess-proj' })];
+  const projectMap = new Map([['sess-proj', { projectId: 'sha256:abc', projectLabel: 'my-project' }]]);
+  const periods = zcode.collectZcodeUsage({
+    nowMs: now,
+    deps: { readUsageRows: () => rows, loadSessionProjects: () => projectMap }
+  });
+  const s = periods.today.sessions['zcode:sess-proj'];
+  assert.ok(s, 'session exists');
+  assert.equal(s.projectId, 'sha256:abc');
+  assert.equal(s.projectLabel, 'my-project');
+});
+
+test('collectZcodeUsage leaves projectId empty when no project map is provided', () => {
+  const now = Date.UTC(2026, 5, 20, 12, 0, 0);
+  const ts = new Date(Date.UTC(2026, 5, 20, 1, 0, 0)).toISOString();
+  const rows = [row({ completedAtMs: Date.parse(ts), timestamp: ts, sessionId: 'sess-noproj' })];
+  const periods = zcode.collectZcodeUsage({ nowMs: now, deps: { readUsageRows: () => rows } });
+  const s = periods.today.sessions['zcode:sess-noproj'];
+  assert.equal(s.projectId, '');
+  assert.equal(s.projectLabel, '');
+});
+
 // --- custom pricing -> cost ------------------------------------------------
 test('collectZcodeUsage computes cost from a per-million pricing map (cache-inclusive input)', () => {
   const now = Date.UTC(2026, 5, 20, 12, 0, 0);
