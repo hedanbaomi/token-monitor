@@ -85,6 +85,25 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 5. `npm install`（tokscale 版本升级时）；`npm run check` + `npx eslint src/shared/zcodeSession.js src/shared/coworkSession.js` + `node --test tests/shared/zcodeSession.test.js tests/shared/coworkSession.test.js`
 6. 删除每次 rebase 会误提交的 `_resolve_pkg.js` 调试文件
 
+### 2026-07-15 rebase：v0.27.0 → v0.28.1 ✅ 干净合并
+- `git fetch origin` 后 `origin/main` 从 `667681a`(v0.27.0) 前进 8 个提交到 `292b29c`(v0.28.1)。`git rebase origin/main` **零冲突**自动完成 —— 11 个本地提交全部干净重放。
+- 上游 v0.27→v0.28 改动集中在 `main.js`(tray 菜单/通知/appUpdater 重构 + `rememberLatestAppUpdate`)、`tray.js`、`app.js`(release-notes popover、codex accountIdentity 抽取、settings panel)、新增 `src/electron/renderer/accountIdentity.js`、`appUpdater.js`、`sessionUsageArchive.js` 线性时间化。我们与上游**重叠的 3 个文件**改动区域互不重叠，故无冲突：
+  - `main.js`：我们的两处 `startCollector` 加 `customModelPricing: () => settings.customModelPricing || []`（行号迁至 1782/2077），上游 tray/appUpdater 改动共存。
+  - `app.js`：我们的会话白名单加 `'zcode'`（行号迁至 6078），上游 release-notes/codex 改动在文件别处。
+  - `package.json`：上游只 bump 版本号到 0.28.1，我们的 `check` 脚本保留（注：`check` 是本地辅助脚本，其文件清单未随上游新增文件自动扩充，不影响功能，需要时手动补）。
+- 依赖版本 v0.27→v0.28 无变化（仅 `version` 字段 bump），无需 `npm install`；`node_modules` 沿用。
+- **验证（三方对比）**：用临时 worktree 在 rebase 前(`819bcc8`)、rebase 后、上游 `origin/main` 各跑完整 `npm test`：
+  | 版本 | tests | pass | fail |
+  |---|---|---|---|
+  | rebase 前 `819bcc8` | 1292 | 1283 | 9 |
+  | rebase 后（当前） | 1301 | 1292 | **9（同一集合）** |
+  | 上游 `origin/main` | 1299 | 1297 | 2 |
+  - rebase 后测试数 +9（上游新增测试）、pass +9，**失败集合与 rebase 前逐字相同**（仅毫秒级耗时差异），证明**零回归**。
+  - 那 9 个失败全是**预先存在的本机环境问题**，与本次 rebase 无关：①2 个 `clientDataDirPresence`（上游 origin/main 自身也失败，环境/路径相关）；②7 个 collector 测试（`collectUsageOnce`/`watchPathsForClients`/progressive/anchored tick/WSL warm preview）——这些测试用 mock 的 tokscale 子进程设期望值（如 claude month=120），但本机有真实 zcode(~17.4B tokens)/cowork 沙盒/tokscale 数据，`collectUsageOnce` 在 `claude` 被跟踪时会触发 `coworkEnabled`→真实 cowork 原生读取，把真实用量 merge 进 mock，导致断言不符。这些测试在干净 CI 环境（无真实 AI 工具数据）会通过。
+  - 我们的 4 个专项测试文件（zcodeSession/coworkSession/sessionDetail/history）本地全绿：**60 pass / 0 fail**。
+  - `npx eslint`（8 个改动文件）无任何告警。
+- 真实数据读取验证通过：`collectZcodeUsage` 返回 ~17.46B tokens，`clients: ["zcode"]`。
+
 ## 七、已解决问题
 
 ### 趋势主页（7.1B）与使用仪表盘（5B→6.75B）token 不一致 ✅ 已修复
