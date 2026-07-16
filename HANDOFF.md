@@ -113,6 +113,12 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - **cowork 补充**（`coworkSession.buildCoworkHistoryGraph`）：tokscale graph 看不到 cowork 沙盒，单独构造逐日 contribution merge 进历史。
 - **结果**：仪表盘从 4.98B → 6.75B，与主页 7.1B 仅差 ~350M（cowork 原生贡献的窗口边界差异）。
 
+### zcode/cowork 的 today/month 用了 UTC 分桶，与其它客户端（本地时区）错位 ✅ 已修复（2026-07-16）
+- **现象**：用户今天（07-16）第一次打开 zcode，dashboard 却显示"今日 zcode 用了 2824333"。查 DB 发现 2824333 正好等于**昨天（07-15）全天的 zcode 用量**——今日窗口把昨天的数据算了进来。
+- **根因**：`zcodeSession.js` 和 `coworkSession.js` 的 `utcDayBoundsMs`/`utcMonthBoundsMs` 用 `Date.UTC(d.getUTCFullYear()...)` 按 **UTC** 切日/月边界；但项目其它所有部分都按**设备本地时区**切边界——collector 的 `localTodayKey()`（`getFullYear()/getMonth()/getDate()`）、`computePeriodWindows()`（`new Date(y,m,d)`）、tokscale 的 `--today`。两者在 UTC 午夜（北京 08:00）/本地午夜（北京 00:00）附近会差一整天，导致一条本地 23:55 的会话被归到"昨天/明天"。原代码注释误以为 usage.js 的 `utcDayKey` 是用量分桶口径，其实它只用于跨记录去重（usage.js 第 271 行注释明说 today/month 是 device-local wall-clock）。
+- **修复**：两个适配器新增 `localDayBoundsMs`/`localMonthBoundsMs`（`new Date(d.getFullYear(),d.getMonth(),d.getDate())`），替换 `collectZcodeUsage`/`collectCoworkUsage` 的 `utcDayBoundsMs`/`utcMonthBoundsMs` 调用；`coworkSession.buildCoworkHistoryGraph` 的逐日 date key 从 `new Date(ts).toISOString().slice(0,10)`（UTC）改为新增的 `localDateKeyFromMs(ts)`（本地），对齐 collector 注入 history 的 `todayKey`（本地）和 history.js 里 graph date 与 todayKey 的字符串比较口径。
+- **验证**：修复后 `collectZcodeUsage` 在模拟 07-15 23:55 本地时刻返回 today=2824333（07-15 全天，正确）；跨到 07-16 00:00 后 today 归零重计。新增 3 个回归测试（zcodeSession/coworkSession 各一个本地午夜边界分桶、cowork graph 本地 date key），与既有测试合计 63/63 通过，eslint 无告警。
+
 ## 八、验证命令速查
 ```cmd
 :: 语法检查

@@ -95,6 +95,41 @@ test('collectZcodeUsage ignores rows with zero tokens and zero cost', () => {
   assert.equal(Object.keys(periods.today.sessions).length, 0);
 });
 
+// Regression: the today/month windows must be LOCAL wall-clock buckets, matching
+// collector.js (localTodayKey / computePeriodWindows) and tokscale --today — not
+// UTC buckets. Using UTC misaligned ZCode's periods from every other client by
+// up to a day around the local-midnight boundary (a 23:55-local session could
+// land in yesterday/tomorrow relative to the rest of the dashboard). This test
+// pins the [startMs, endMs) range to the local day so the regression can't
+// silently return.
+test('collectZcodeUsage buckets today by LOCAL wall-clock, not UTC', () => {
+  const now = new Date(2026, 5, 20, 12, 0, 0).getTime(); // local 2026-06-20 noon
+  const localMidnight = new Date(2026, 5, 20, 0, 0, 0).getTime();
+  const localNextMidnight = new Date(2026, 5, 21, 0, 0, 0).getTime();
+
+  // A row at local 23:30 today — must count as "today". Under UTC bucketing on
+  // a negative-offset machine this would spill into the next UTC day.
+  const lateToday = new Date(2026, 5, 20, 23, 30, 0).getTime();
+  // A row at local 00:30 today — must count as "today". Under UTC bucketing on a
+  // positive-offset machine this could still belong to the previous UTC day.
+  const earlyToday = new Date(2026, 5, 20, 0, 30, 0).getTime();
+  // A row at local 23:30 YESTERDAY — must NOT count as today.
+  const lateYesterday = new Date(2026, 5, 19, 23, 30, 0).getTime();
+
+  const rows = [
+    row({ completedAtMs: lateToday, timestamp: new Date(lateToday).toISOString(), sessionId: 's-late', totalTokens: 100 }),
+    row({ completedAtMs: earlyToday, timestamp: new Date(earlyToday).toISOString(), sessionId: 's-early', totalTokens: 200 }),
+    row({ completedAtMs: lateYesterday, timestamp: new Date(lateYesterday).toISOString(), sessionId: 's-yest', totalTokens: 400 })
+  ];
+
+  const periods = zcode.collectZcodeUsage({ nowMs: now, allTimeSince: '2026-06-01', deps: { readUsageRows: () => rows } });
+
+  // Both today-side rows are in; yesterday's is out — regardless of the host TZ.
+  assert.equal(periods.today.totalTokens, 300, `today should span local [${new Date(localMidnight).toString()} .. ${new Date(localNextMidnight).toString()})`);
+  assert.equal(Object.keys(periods.today.sessions).length, 2);
+  assert.ok(!periods.today.sessions['zcode:s-yest'], "yesterday's late row must not leak into today");
+});
+
 test('allTimeSince excludes rows older than the anchor', () => {
   const now = Date.UTC(2026, 5, 20, 12, 0, 0);
   const oldMs = Date.UTC(2025, 0, 1, 0, 0, 0); // before the 2026-01-01 anchor

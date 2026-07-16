@@ -118,3 +118,48 @@ test('cost is computed from a per-million pricing map', () => {
 test('COWORK_CLIENT constant is claude (unified attribution)', () => {
   assert.equal(cowork.COWORK_CLIENT, 'claude');
 });
+
+// Regression: today/month must be LOCAL wall-clock buckets, matching collector.js
+// (localTodayKey) and tokscale --today. Using UTC buckets misaligned Cowork from
+// every other client near the local-midnight boundary. See zcodeSession.test.js
+// for the same regression on the ZCode side.
+test('today buckets by LOCAL wall-clock, not UTC', () => {
+  const now = new Date(2026, 5, 20, 12, 0, 0).getTime(); // local 2026-06-20 noon
+  const mkRow = (ms, tokens, sid) => ({
+    client: 'claude', sessionId: sid, model: 'claude-opus-4-8',
+    inputTokens: tokens, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+    totalTokens: 0, costUsd: 0,
+    timestamp: new Date(ms).toISOString(), completedAtMs: ms
+  });
+  const rows = [
+    mkRow(new Date(2026, 5, 20, 23, 30, 0).getTime(), 100, 'late'),     // local 23:30 today
+    mkRow(new Date(2026, 5, 20, 0, 30, 0).getTime(), 200, 'early'),     // local 00:30 today
+    mkRow(new Date(2026, 5, 19, 23, 30, 0).getTime(), 400, 'yest')      // local 23:30 yesterday
+  ];
+  const p = cowork.collectCoworkUsage({ nowMs: now, allTimeSince: '2026-06-01', deps: { readUsageRows: () => rows } });
+  assert.equal(p.today.totalTokens, 300, 'today spans local [00:00, next 00:00)');
+  assert.equal(Object.keys(p.today.sessions).length, 2);
+  assert.ok(!p.today.sessions['claude:yest'], "yesterday's late row must not leak into today");
+});
+
+// buildCoworkHistoryGraph keys each contribution by the LOCAL date, matching the
+// todayKey (localTodayKey) the collector injects into the merged history. UTC keys
+// here would slide Cowork's contribution a day off "today" near midnight.
+test('buildCoworkHistoryGraph keys contributions by LOCAL date', () => {
+  const mkRow = (ms, tokens) => ({
+    client: 'claude', sessionId: 's', model: 'claude-opus-4-8',
+    inputTokens: tokens, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+    totalTokens: 0, costUsd: 0,
+    timestamp: new Date(ms).toISOString(), completedAtMs: ms
+  });
+  // One row late on local 2026-06-20, one early on local 2026-06-20.
+  const rows = [
+    mkRow(new Date(2026, 5, 20, 23, 30, 0).getTime(), 100),
+    mkRow(new Date(2026, 5, 20, 0, 30, 0).getTime(), 200)
+  ];
+  const graph = cowork.buildCoworkHistoryGraph({ allTimeSince: '2026-06-01', deps: { readUsageRows: () => rows } });
+  // Both rows fall on local 2026-06-20 → a single contribution keyed by that date.
+  assert.equal(graph.contributions.length, 1);
+  assert.equal(graph.contributions[0].date, '2026-06-20');
+  assert.equal(graph.contributions[0].totals.tokens, 300);
+});

@@ -127,16 +127,22 @@ function msFromIso(value) {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-// UTC boundaries, matching how usage.js buckets periods (utcDayKey/utcMonthKey).
-function utcDayBoundsMs(nowMs) {
+// Local wall-clock boundaries, matching how the collector buckets "today" and
+// "month" in the device's own timezone (localTodayKey / computePeriodWindows in
+// collector.js, and tokscale's --today). usage.js's utcDayKey is only used for
+// cross-record dedup, NOT for usage bucketing — using UTC here misaligns ZCode's
+// periods from every other client by up to a day around the UTC-midnight / local-
+// midnight boundary, so e.g. a session at 23:55 local could land in "yesterday"
+// or "tomorrow" relative to the rest of the dashboard.
+function localDayBoundsMs(nowMs) {
   const d = new Date(nowMs);
-  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   return { startMs: start, endMs: start + 24 * 60 * 60 * 1000 };
 }
-function utcMonthBoundsMs(nowMs) {
+function localMonthBoundsMs(nowMs) {
   const d = new Date(nowMs);
-  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
-  const end = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+  const start = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+  const end = new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime();
   return { startMs: start, endMs: end };
 }
 
@@ -441,8 +447,8 @@ function collectZcodeUsage(options = {}) {
   const month = emptyPeriod();
   const allTime = emptyPeriod();
 
-  const day = utcDayBoundsMs(nowMs);
-  const mon = utcMonthBoundsMs(nowMs);
+  const day = localDayBoundsMs(nowMs);
+  const mon = localMonthBoundsMs(nowMs);
 
   // Map session_id -> {projectId, projectLabel} from ZCode's `session` table
   // (directory column = workspace path). Lets ZCode sessions appear in the

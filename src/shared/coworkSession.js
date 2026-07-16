@@ -127,16 +127,28 @@ function emptyPeriod() {
   };
 }
 
-function utcDayBoundsMs(nowMs) {
+// Local wall-clock boundaries — see zcodeSession.js for rationale. The collector
+// buckets today/month in the device's own timezone (localTodayKey /
+// computePeriodWindows, tokscale --today), so Cowork must match or its periods
+// drift from the rest of the dashboard around the UTC-midnight boundary.
+function localDayBoundsMs(nowMs) {
   const d = new Date(nowMs);
-  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   return { startMs: start, endMs: start + 24 * 60 * 60 * 1000 };
 }
-function utcMonthBoundsMs(nowMs) {
+function localMonthBoundsMs(nowMs) {
   const d = new Date(nowMs);
-  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
-  const end = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+  const start = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+  const end = new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime();
   return { startMs: start, endMs: end };
+}
+// Local 'YYYY-MM-DD' for a timestamp — matches collector's localTodayKey shape.
+function localDateKeyFromMs(ms) {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 function msFromIso(value) {
   if (!value) return 0;
@@ -278,8 +290,8 @@ function collectCoworkUsage(options = {}) {
   const month = emptyPeriod();
   const allTime = emptyPeriod();
 
-  const day = utcDayBoundsMs(nowMs);
-  const mon = utcMonthBoundsMs(nowMs);
+  const day = localDayBoundsMs(nowMs);
+  const mon = localMonthBoundsMs(nowMs);
 
   const rows = (deps.readUsageRows || readUsageRows)(deps);
   for (const row of rows) {
@@ -316,7 +328,11 @@ function buildCoworkHistoryGraph(options = {}) {
     const cacheWrite = num(row.cacheWriteTokens);
     const total = input + output + cacheRead + cacheWrite;
     if (total <= 0) continue;
-    const day = new Date(ts).toISOString().slice(0, 10);
+    // Local-date key, matching the todayKey the collector injects into the
+    // merged history (localTodayKey) and every other client's day bucket.
+    // Using UTC here (toISOString) would slide Cowork's contribution one day
+    // off the dashboard's "today" near the UTC-midnight boundary.
+    const day = localDateKeyFromMs(ts);
     let d = byDay.get(day);
     if (!d) { d = { tokens: 0, cost: 0 }; byDay.set(day, d); }
     d.tokens += total;
