@@ -104,6 +104,15 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
   - `npx eslint`（8 个改动文件）无任何告警。
 - 真实数据读取验证通过：`collectZcodeUsage` 返回 ~17.46B tokens，`clients: ["zcode"]`。
 
+### 2026-07-19 rebase：v0.28.1 → v0.31.0 ⚠️ 手工合并 2 处冲突
+- `git fetch origin` 后 `origin/main` 从 `292b29c`(v0.28.1) 前进 31 个提交到 `ce0c2ea`(v0.31.0)，跨越 v0.29/v0.30/v0.31 三次发布。`git rebase origin/main` 在 2 个提交上冲突，手工解决后 12 个本地提交全部重放（原 13 个里 `07c9bf5` 删调试脚本被自动 drop——上游基线已无 `_resolve_pkg.js`）。
+- **冲突 1**（`87e67ed` feat：ZCode + Cowork 主体，collector.js）：上游在 v0.29-v0.31 重构了 `collectUsageOnce` 的 tokscale 块——把 `if (projectsEnabled) { decorate... }` 改成无条件装饰（项目身份经 `decorateLocalPeriods` 的 `resolveProjects: projectsEnabled` 参数门控，issue #182），并把 tokscale 调用包进新的 try/catch。**我们 87e67ed 当时也独立加了 try/catch（同样为防止 tokscale 失败抹掉原生读取）+ `tokscaleClientsCsv()`**。git 自动合并把双方 try/catch/decorate 逻辑搅在一起产生重复块。**解决**：采用上游新结构（无条件 decorate + `resolveProjects` 参数），保留我们的 `tokscaleClientsCsv(normalizedClients)` 和外层 try/catch（上游没有外层 try/catch，我们的更稳）。删除 git 产生的重复 anchored/else-if 块。
+- **冲突 2**（`63b1dab` feat：cowork history graph，collector.js）：上游 v0.31 在 `collectHistoryOnce` 新增 `rawGraphs[]` 收集 + `dailyHistoryArchive`（issue #193：源 cleanup 后保留每日历史）分支，在 `mergeHistories` 之前 return。我们 63b1dab 加的 `coworkGraph` 分支在同区域。**解决**：保留上游 `rawGraphs` + `dailyHistoryArchive` 结构，把我们的 `coworkGraph` 也 push 进 `rawGraphs`（**改进**：daily history archive 现在也覆盖 cowork 历史，源 cleanup 后 cowork 用量同样被保留），同时 push 进 `histories` 供无 archive 路径合并。
+- **依赖更新**：上游 `04ebf4d chore(deps): update tokscale to 4.5.3`，`npm install` 更新 3 个包。其余 `main.js`/`app.js`/`usage.js`/`history.js` 与上游重叠区域 git 全部自动合并（我们的 `customModelPricing` getter×2、会话白名单 `'zcode'`、`normalizeClientName` 等均保留）。
+- **上游 v0.29-v0.31 其它值得注意的改动**（与 zcode/cowork 无直接冲突，但间接相关）：①`sessionTimestampMap` 加 `resolveProjects` 门控（项目可选，但时间戳总是回填——影响 Sessions 视图排序）；②`history.js` intensity 拆成 `tokenIntensity`/`costIntensity`（heatmap 加 Tokens/Cost 切换，#190）；③`usage.js` 新增 `sessionDetailsOmitted`/`periodProjectsOmitted`/`syncUploadIntervalMs` 透传 + `aggregateDevices` 按 sync 上传间隔调整 stale 判定。
+- **验证（与 rebase 前对比）**：rebase 前完整 `npm test` = 1329 tests / 1320 pass / **9 fail**；rebase 后 = **1462 tests / 1453 pass / 9 fail**。测试数 +133（上游三版本新增大量测试），pass +133，**失败集合与 rebase 前逐字相同**（6 个 collector mock 被本机真实数据污染 + 3 个 clientDataDirPresence 环境失败），证明**零回归**。我们的 4 个专项测试文件全绿（64 pass / 0 fail，含时区修复新增的 3 个回归测试）。`npx eslint`（8 个改动文件）无告警。
+- 真实数据验证：`collectZcodeUsage` 返回 today 7.75M / month 977M / allTime 1.64B，模型 `GLM-5.2`，时区修复后随使用实时增长。
+
 ## 七、已解决问题
 
 ### 趋势主页（7.1B）与使用仪表盘（5B→6.75B）token 不一致 ✅ 已修复
