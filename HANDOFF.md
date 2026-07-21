@@ -113,6 +113,16 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - **验证（与 rebase 前对比）**：rebase 前完整 `npm test` = 1329 tests / 1320 pass / **9 fail**；rebase 后 = **1462 tests / 1453 pass / 9 fail**。测试数 +133（上游三版本新增大量测试），pass +133，**失败集合与 rebase 前逐字相同**（6 个 collector mock 被本机真实数据污染 + 3 个 clientDataDirPresence 环境失败），证明**零回归**。我们的 4 个专项测试文件全绿（64 pass / 0 fail，含时区修复新增的 3 个回归测试）。`npx eslint`（8 个改动文件）无告警。
 - 真实数据验证：`collectZcodeUsage` 返回 today 7.75M / month 977M / allTime 1.64B，模型 `GLM-5.2`，时区修复后随使用实时增长。
 
+### 2026-07-21 rebase：v0.31.0 → v0.32.0 ✅ 仅 1 处简单冲突
+- `git fetch origin` 后 `origin/main` 从 `ce0c2ea`(v0.31.0) 前进 13 个提交到 `2edd0a1`(v0.32.0)。`git rebase origin/main` 仅在 `03e6b51`(feat：ZCode + Cowork 主体)冲突 1 处，解决后 13 个本地提交全部干净重放。**无 `_resolve_pkg.js` 残留**（这次没产生）。
+- **冲突**（collector.js 第 24-30 行）：双方都在 `hashKey` require 后加新 import——上游加 `const { hostOsInfo, normalizeOsInfo } = require('./osVersion')`（v0.32 设备 OS 版本显示，#208），我们加 `zcodeSession`/`coworkSession` require。**解决**：两行都保留（顺序：上游 osVersion 在前、我们的 zcode/cowork 在后）。纯 import 冲突，无语义影响。
+- **自动合并验证**：上一轮 v0.31 rebase 手工解决的 tokscale 块（无条件 decorate + `resolveProjects` + 我们的 `tokscaleClientsCsv` + 外层 try/catch）和 collectHistoryOnce 块（`rawGraphs` + `dailyHistoryArchive` + 我们的 `coworkGraph` push 进 rawGraphs）这次 git **全部正确自动合并**，无需再手工干预——说明上一轮的合并形态已成为基线，git 能识别。
+- **summary 块**：上游在 `collectUsageOnce` 的 summary 加 `osName`/`osVersion` 字段（从 `osInfo` 解析），git 自动合并在我们的 zcode/cowork merge 块之后、history 块之前。验证 summary 输出含 osInfo（`hostOsInfo()` 返回 `{"name":"Windows 11","version":"25H2"}`）。
+- **依赖**：tokscale 仍是 4.5.3，无变化，无需 `npm install`。
+- **上游 v0.32 值得注意的改动**：①GUI 密钥移出 settings.json（`credentialStore.js`，#200——cursor/codex/mimo 等 cookie/凭证改用 OS keychain/加密存储）；②per-device 用量细分（`deviceBreakdown.js`，#206）；③OS 版本显示（`osVersion.js`，#208）；④grok 统一积分（`grokLimits.js`，#175）；⑤limits 重置窗口定时刷新（collector `scheduleLimitsResetBoundary`，#212）。这些都在我们的 zcode/cowork 集成区域之外。
+- **验证（与 rebase 前对比）**：rebase 前完整 `npm test` = 1462 tests / 1453 pass / **9 fail**；rebase 后 = **1541 tests / 1530 pass / 9 fail**。测试数 +79（上游 v0.32 新增），pass +77（差 2 是上游新增测试里 2 个也踩到本机环境失败，已计入那 9 个），**失败集合与 rebase 前逐字相同**（6 个 collector mock 被本机真实数据污染 + 3 个 clientDataDirPresence 环境失败），证明**零回归**。我们的 4 个专项测试文件全绿（64 pass / 0 fail）。`npx eslint`（8 个改动文件）无告警。
+- 真实数据验证：`collectZcodeUsage` 返回 today 3.91M / month 1.09B / allTime 1.66B，模型 `GLM-5.2`。
+
 ## 七、已解决问题
 
 ### 趋势主页（7.1B）与使用仪表盘（5B→6.75B）token 不一致 ✅ 已修复
