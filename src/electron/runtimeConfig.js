@@ -116,6 +116,12 @@ function usageConfigFromSettings(settings = {}, context = {}) {
     intervalRequiresActivity: Boolean(context.intervalRequiresActivity),
     watchDebounceMs: Number(context.watchDebounceMs || 1500),
     wslScanEnabled: settings.wslScanEnabled !== false,
+    // Function-style getter so the ZCode adapter (which bypasses tokscale and
+    // never sees tokscale's custom-pricing file) always reads the live setting:
+    // editing a model's unit price applies on the next tick without recreating
+    // the collector. Mirrors the getter that used to live in main.js's
+    // startCollector call before the v0.33 device-runtime refactor.
+    customModelPricing: () => settings.customModelPricing || [],
     onError: context.onError,
     logger: context.logger
   };
