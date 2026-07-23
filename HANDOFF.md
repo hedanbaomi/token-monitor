@@ -135,6 +135,15 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - **验证（与 rebase 前对比）**：rebase 前完整 `npm test` = 1541 tests / 1530 pass / **9 fail**；rebase 后 = **1669 tests / 1658 pass / 9 fail**。测试数 +128（上游 v0.33 新增大量 deviceRuntime/limitsRuntime 测试），pass +128，**失败集合与 rebase 前逐字相同**（6 个 collector mock 被本机真实数据污染 + 3 个 clientDataDirPresence 环境失败），证明**零回归**。我们的 4 个专项测试文件全绿（64 pass / 0 fail）。`npx eslint`（9 个改动文件，含新增 runtimeConfig.js）无告警。
 - 真实数据验证：`collectZcodeUsage` 返回 today 32.8M / month 1.23B；customModelPricing getter 链路验证通过。
 
+### 2026-07-23 rebase：v0.33.0 → v0.34.0 ✅ 零冲突 + 依赖大升级
+- `git fetch origin` 后 `origin/main` 从 `3b752fd`(v0.33.0) 前进 13 个提交到 `38c3789`(v0.34.0)。**`git rebase origin/main` 零冲突**——16 个本地提交全部干净重放。原因：v0.34 **没有改动 `collector.js`**（我们 zcode/cowork 集成的核心文件不变），且 `main.js`/`runtimeConfig.js` 的改动区域与我们的不重叠——上一轮 v0.33 手工解决的 `createDeviceRuntime` + `customModelPricing` getter 形态这次 git 正确自动合并。
+- **依赖大升级**（`#237` + `42d8f5c`）：Electron + Node 包升级，tokscale 4.5.3 → **4.6.1**（二进制分发方式改变：平台二进制从 `@tokscale/cli` 内置改为 optionalDependencies 的独立包 `@tokscale/cli-win32-x64-msvc` 等）。`npm install` 更新 4 added / 247 removed / 38 changed。**注意**：升级 electron 时若有 token-monitor 实例在运行，会 EBUSY 锁住 `node_modules/electron/dist/electron.exe`——需先 `taskkill` 所有 electron.exe 进程（本次终止 PID 41556/38628/44816/8104）。
+- **tokscale 4.6.1 二进制陷阱**：optionalDependencies 的平台二进制首次 `npm install` 因网络 ECONNRESET 未装上（只装了 `@tokscale/cli` JS wrapper，缺 `@tokscale/cli-win32-x64-msvc`），需单独 `npm install @tokscale/cli-win32-x64-msvc@4.6.1 --no-save` 补装。装上后 exe 还可能被 Windows Defender 实时扫描短暂锁住（"file being used by another process"），等扫描结束或重启后恢复——这是环境问题，非代码问题。
+- **上游 v0.34 值得注意的改动**（与 zcode/cowork 无直接冲突）：①opt-in 自动更新下载（`#239`，appUpdater）；②Accent Blur glass 模式（`#229`，windowsBackdrop）；③limits 探测性能优化 + Retry-After（`#227`，limitsRetryPolicy/probeDeadline）；④Home 上下文返回控件（`#238`）；⑤活动日范围同步设置（`#210`）。这些都在 zcode/cowork 集成区域之外。
+- **验证（与 rebase 前对比）**：rebase 前完整 `npm test` = 1669 tests / 1658 pass / **9 fail**；rebase 后 = **1729 tests / 1722 pass / 5 fail**。测试数 +60（上游 v0.34 新增），失败数 **9→5（反而少了 4 个）**——rebase 前 6 个 collector mock 被本机真实数据污染的失败，这次因 tokscale 4.6.1 行为变化只剩 1 个（`watchPathsForClients`）。
+- **5 个失败全部是环境/上游问题，零代码回归**：①`clientDataDirPresence detects Cline...`（预存环境失败）；②`clientDataDirPresence requires...`（预存）；③`watchPathsForClients watches Pi...`（预存）；④`default tracked clients are accepted by bundled tokscale`（tokscale.exe 被 Defender 锁定，环境问题）；⑤`reset boundaries enqueue...`（上游 v0.34 新加的计时敏感 flaky test，重跑一次即过）。我们的 4 个专项测试文件全绿（64 pass / 0 fail）。`npx eslint`（9 个改动文件）无告警。
+- 真实数据验证：`collectZcodeUsage` 返回 today 9.43M / month 1.24B / allTime 1.58B，模型 `GLM-5.2`；customModelPricing getter 链路验证通过。
+
 ## 七、已解决问题
 
 ### 趋势主页（7.1B）与使用仪表盘（5B→6.75B）token 不一致 ✅ 已修复
