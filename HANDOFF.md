@@ -144,6 +144,13 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - **5 个失败全部是环境/上游问题，零代码回归**：①`clientDataDirPresence detects Cline...`（预存环境失败）；②`clientDataDirPresence requires...`（预存）；③`watchPathsForClients watches Pi...`（预存）；④`default tracked clients are accepted by bundled tokscale`（tokscale.exe 被 Defender 锁定，环境问题）；⑤`reset boundaries enqueue...`（上游 v0.34 新加的计时敏感 flaky test，重跑一次即过）。我们的 4 个专项测试文件全绿（64 pass / 0 fail）。`npx eslint`（9 个改动文件）无告警。
 - 真实数据验证：`collectZcodeUsage` 返回 today 9.43M / month 1.24B / allTime 1.58B，模型 `GLM-5.2`；customModelPricing getter 链路验证通过。
 
+### 2026-07-26 rebase：v0.34.0 → v0.35.0 ✅ 零冲突
+- `git fetch origin` 后 `origin/main` 从 `38c3789`(v0.34.0) 前进 12 个提交到 `2e3ea2d`(v0.35.0)。**`git rebase origin/main` 零冲突**——17 个本地提交全部干净重放。v0.35 **没有改动 `collector.js`/`usage.js`/`history.js`**（我们的 zcode/cowork 集成核心文件不变）；`runtimeConfig.js` 上游只在 `limitsConfigFromSettings`（不同函数）加了 `openrouterProfiles`，与我们改的 `usageConfigFromSettings`（customModelPricing getter）不冲突，自动合并。
+- **依赖**：tokscale 4.6.1 → **4.7.0**（`npm install` 改 3 个包）。electron 仍是 43.2.0，**未升级**，所以不触发 postinstall 重下，即使有 electron 进程在跑也不会 EBUSY——electron.exe（225MB）保持完整。
+- **上游 v0.35 值得注意的改动**（与 zcode/cowork 无直接冲突）：①OpenRouter 账户额度（`#247`，runtimeConfig/limits）；②自定义菜单栏布局（`#251`，tray）；③Windows 静默更新安装（`#253`）；④Codex 工作区账户身份（`#254`/`#257`）；⑤limits tooltip/credits 语义解耦（`#252`）；⑥macOS Space 菜单窗口（`#250`）；⑦DeepSeek 余额历史紧凑化（`#246`）。这些都在 zcode/cowork 集成区域之外。
+- **验证（与 rebase 前对比）**：rebase 前完整 `npm test` = 1729 tests / 1722 pass / **5 fail**；rebase 后 = **1816 tests / 1811 pass / 3 fail**。测试数 +87，失败数 **5→3（又少了 2 个）**——剩余 3 个全是预存环境失败（1 个 clientDataDirPresence + 2 个 collectorLoadGuards 被本机真实数据污染），零代码回归。我们的 4 个专项测试文件全绿（64 pass / 0 fail）。`npx eslint`（9 个改动文件）无告警。
+- 真实数据验证：`collectZcodeUsage` 返回 today 3.83M / month 1.37B / allTime 1.60B，模型 `GLM-5.2`。
+
 ## 七、已解决问题
 
 ### 趋势主页（7.1B）与使用仪表盘（5B→6.75B）token 不一致 ✅ 已修复
