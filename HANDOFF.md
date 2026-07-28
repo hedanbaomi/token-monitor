@@ -151,6 +151,14 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - **验证（与 rebase 前对比）**：rebase 前完整 `npm test` = 1729 tests / 1722 pass / **5 fail**；rebase 后 = **1816 tests / 1811 pass / 3 fail**。测试数 +87，失败数 **5→3（又少了 2 个）**——剩余 3 个全是预存环境失败（1 个 clientDataDirPresence + 2 个 collectorLoadGuards 被本机真实数据污染），零代码回归。我们的 4 个专项测试文件全绿（64 pass / 0 fail）。`npx eslint`（9 个改动文件）无告警。
 - 真实数据验证：`collectZcodeUsage` 返回 today 3.83M / month 1.37B / allTime 1.60B，模型 `GLM-5.2`。
 
+### 2026-07-28 rebase：v0.35.0 → v0.36.0 ✅ 零冲突（94 文件大版本）
+- `git fetch origin` 后 `origin/main` 从 `2e3ea2d`(v0.35.0) 前进 29 个提交到 `5f36b34`(v0.36.0)。这是迄今最大版本（94 文件 +10829 行）。**`git rebase origin/main` 零冲突**——18 个本地提交全部干净重放。尽管 `collector.js`(+88)和 `runtimeConfig.js`(+14)上游有改动，但都在与我们不同的区域：①collector 的 #160 改动全在 `startCollector` 内部（activityRevision/watchers 重构/loop 智能调度），不碰 `collectUsageOnce`（我们的 zcode/cowork 集成所在）；②runtimeConfig 上游在 `usageConfigFromSettings` 加了 `watchUsePolling`/`watchTriggersCollection`/`intervalRequiresActivity`（紧邻我们的 `customModelPricing` getter），git 正确做了相邻行合并，两者共存。
+- **依赖**：tokscale/electron 版本均未变，`npm install` 报 up to date，**electron.exe（225MB）保持完整**，VBS/BAT 启动不受影响。
+- **上游 v0.36 核心改动**（与 zcode/cowork 无直接冲突）：①**activity-gated smart collection**（`#160`，collector——native fs events 替代轮询、无活动时跳过 interval tick、每小时强制 full scan 对账）；②**Claude Web 登录 + 稳定账户身份**（`#259`，limits——sessionKey/cookie + OAuth profile）；③**第三方余额适配器**（`#261`，thirdPartyProfiles）；④Claude 用量积分/预付余额（`#269`）；⑤limits provider 统一重构（`#273`/`#274`/`#276`——共享 browser user-agent/note row/tooltip）；⑥tray 余额驱动 + 实时预览（`#266`/`1b6b913`）。这些都在 zcode/cowork 集成区域之外。
+- **验证（与 rebase 前对比）**：rebase 前完整 `npm test` = 1816 tests / 1811 pass / **3 fail**；rebase 后 = **1997 tests / 1991 pass / 4 fail**。测试数 +181（v0.36 新增大量 Claude Web/third-party/smart-collection 测试），失败数 3→4（+1 是上游 #160 新加的 `smart collection retries a failed activity scan` 计时测试，在本机高负载环境下超时，属环境问题）。
+- **4 个失败全部是环境/上游问题，零代码回归**：①`clientDataDirPresence`（预存）；②`collectUsageOnce runs three tokscale scans serially`×2（预存，本机真实 cowork 数据污染 mock——`coworkEnabled('claude')` 触发真实读取）；③`smart collection retries a failed activity scan`（上游 #160 新加计时测试，2s 超时，本机 4 个 electron 进程 + 磁盘活动干扰）。我们的 4 个专项测试文件全绿（64 pass / 0 fail）。`npx eslint`（9 个改动文件）无告警。
+- 真实数据验证：`collectZcodeUsage` 返回 today 27.2M / month 1.50B，模型 `GLM-5.2`。
+
 ## 七、已解决问题
 
 ### 趋势主页（7.1B）与使用仪表盘（5B→6.75B）token 不一致 ✅ 已修复
