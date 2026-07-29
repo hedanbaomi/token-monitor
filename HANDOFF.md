@@ -159,6 +159,13 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - **4 个失败全部是环境/上游问题，零代码回归**：①`clientDataDirPresence`（预存）；②`collectUsageOnce runs three tokscale scans serially`×2（预存，本机真实 cowork 数据污染 mock——`coworkEnabled('claude')` 触发真实读取）；③`smart collection retries a failed activity scan`（上游 #160 新加计时测试，2s 超时，本机 4 个 electron 进程 + 磁盘活动干扰）。我们的 4 个专项测试文件全绿（64 pass / 0 fail）。`npx eslint`（9 个改动文件）无告警。
 - 真实数据验证：`collectZcodeUsage` 返回 today 27.2M / month 1.50B，模型 `GLM-5.2`。
 
+### 2026-07-29 rebase：v0.36.0 → v0.37.0 ✅ 零冲突
+- `git fetch origin` 后 `origin/main` 从 `5f36b34`(v0.36.0) 前进 6 个提交到 `ad76d66`(v0.37.0)。**`git rebase origin/main` 零冲突**——19 个本地提交全部干净重放。我们所有核心文件（collector.js/runtimeConfig.js/zcodeSession.js/coworkSession.js/usage.js/history.js/sessionDetail.js）上游**均无改动**（`git diff --stat` 为空）；v0.37 的 6 个提交全是 limits/settings/renderer UI 改动。
+- **依赖**：无 `chore(deps)` 提交，tokscale/electron 版本未变，无需 `npm install`；electron.exe 保持完整。
+- **上游 v0.37 改动**（与 zcode/cowork 无关）：①provider 账户合并进 AI 工具限额（`#281`）；②provider 行拖拽排序（`#279`）；③DeepSeek 详细消费历史（`#278`）；④provider 状态点尺寸/拖拽 blur 修复。全在 limits/settings UI 区域。
+- **验证（与 rebase 前对比）**：rebase 前完整 `npm test` = 1997 tests / 1991 pass / **4 fail**；rebase 后 = **2048 tests / 2042 pass / 4 fail**。测试数 +51，**失败集合与 rebase 前逐字相同**（1 个 clientDataDirPresence + 2 个 collectorLoadGuards serial scan 被本机真实数据污染 + 1 个 smart collection 计时超时），零代码回归。我们的 4 个专项测试文件全绿（64 pass / 0 fail）。`npx eslint`（7 个核心改动文件）无告警。
+- 真实数据验证：`collectZcodeUsage` 返回 today 69.4M / month 1.57B，模型 `GLM-5.2`。
+
 ## 七、已解决问题
 
 ### 趋势主页（7.1B）与使用仪表盘（5B→6.75B）token 不一致 ✅ 已修复
