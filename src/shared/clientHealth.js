@@ -226,7 +226,6 @@ const CLIENT_SOURCE_CHECK_IDS = Object.freeze([
   'workbuddy-projects',
   'zcode-cli-db',
   'zcode-projects',
-  'zcode-rollout',
   'zed-threads'
 ]);
 

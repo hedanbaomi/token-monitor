@@ -1,18 +1,12 @@
 'use strict';
 
-// Reads ZCode token usage directly from the agent's own local store.
+// Reads ZCode session transcripts for the Session Detail panel.
 //
-// ZCode persists per-LLM-call usage in a SQLite database at
-//   ~/.zcode/cli/db/db.sqlite  (table `model_usage`)
-// and as append-only JSONL "rollout" files at
-//   ~/.zcode/cli/rollout/model-io-sess_*.jsonl  (one line per request)
-//
-// The DB is the authoritative, structured source (pre-aggregated per model call
-// with input/output/reasoning/cache tokens + provider/model/session/timestamp),
-// so we read it first. The JSONL rollout is a fallback for when the DB can't be
-// opened (e.g. older ZCode builds). Either way we emit the neutral period shape
-// produced by ./usage (emptyPeriod() + clients/models/clientModels/sessions maps)
-// so the collector merges us exactly like a tokscale scan — see mergePeriods().
+// Period totals now come from tokscale (upstream watches ~/.zcode/cli/db and
+// scans db.sqlite). This module remains for clickable session detail: tokscale
+// has no ZCode transcript path, so we still read ~/.zcode/cli/db/db.sqlite
+// (`model_usage` / `turn_usage` / `input_history`) and JSONL rollout fallback.
+// collectZcodeUsage() is kept for tests; the collector no longer merges it.
 //
 // This mirrors the discovery + read-only node:sqlite + deps-seam pattern used by
 // ./opencodeLimits and ./opencodeSession (the only other DB-reading clients).

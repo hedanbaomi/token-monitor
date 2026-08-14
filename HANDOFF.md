@@ -5,7 +5,10 @@
 
 ## 一、总体目标
 
-为 token-monitor 增加 **ZCode**（智谱 ZCode CLI）和 **Claude Cowork**（Claude Desktop 桌面应用的 agent 功能）两个 AI 工具的 token 监测支持。两者都是上游 tokscale 无法正确扫描的客户端，因此采用**原生读取**方案（直接读本地数据库/JSONL，绕过 tokscale）。
+为 token-monitor 增加 **Claude Cowork** 的 token 监测，并让 **ZCode** 走上游 tokscale 路径。
+
+- **ZCode**：上游 tokscale 已能扫描 `~/.zcode/cli/db/db.sqlite`。周期用量与历史 graph 都走 tokscale，不再原生 merge（避免与上游双计）。会话详情仍读本地 SQLite（tokscale 没有 ZCode transcript 路径）。
+- **Cowork**：上游仍扫不到 Claude Desktop 沙盒，继续原生读取，用量归到 `claude`。
 
 ## 二、ZCode 的本地数据位置（关键）
 
@@ -58,7 +61,7 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 ### 修改文件（核心改动）
 | 文件 | 改动 |
 |---|---|
-| `src/shared/collector.js` | ① `NATIVE_ONLY_CLIENTS = {zcode, proma}` + `tokscaleClientsCsv()`：从 tokscale CSV 剔除原生客户端 ② `collectUsageOnce` 中 tokscale 扫描包 **try/catch**（tokscale 失败不再连累原生读取）③ `enabledZcode`/`coworkEnabled`/`zcodePricingMap` 辅助 ④ `clientWatchCandidates` 加 zcode(`~/.zcode/cli/db`+`rollout`) 和 cowork 监听路径 ⑤ `collectUsageOnce` 在 tokscale+WSL 后 merge zcode 和 cowork 用量 |
+| `src/shared/collector.js` | ① `NATIVE_ONLY_CLIENTS = {proma}` + `tokscaleClientsCsv()`：ZCode 走 tokscale，只剔 proma ② tokscale 扫描包 **try/catch**（失败不连累 cowork 原生读取）③ `coworkEnabled`/`zcodePricingMap` ④ cowork 监听路径并入 `claude` ⑤ `collectUsageOnce` 在 tokscale+WSL 后只 merge cowork |
 | `src/shared/sessionDetail.js` | 新增 `readZcodeSessionDetail` 分支 + `readSessionDetail` 的 `if (client === 'zcode')` 分发 |
 | `src/shared/clientTracking.js` | `DEFAULT_CLIENTS` 加 `zcode`（cowork 不加，归 claude） |
 | `src/shared/usage.js` | `normalizeClientName` 加 `zcode`/`z-code` 归一化 |
@@ -68,7 +71,7 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 
 ## 五、关键设计决策与坑
 
-1. **zcode 走原生，不走 tokscale**：tokscale 的 zcode 实现路径（`~/.zcode/projects`）是错的，ZCode 不写那里。原生读 `~/.zcode/cli/db` 才有数据。
+1. **zcode 走 tokscale**：上游已 watch `cli/db`（`zcode-cli-db`）并用 tokscale 扫 `db.sqlite`。周期与 graph 都交给 tokscale。`zcodeSession.js` 只服务会话详情。
 2. **cowork 归到 claude**：避免出现"opus(code)"和"opus(cowork)"分开显示。无重复计数（tokscale 读 `~/.claude/projects`，cowork 读沙盒路径，磁盘不重叠）。
 3. **cache-inclusive 修正**（#68）：ZCode input_tokens 含缓存，总量 = input+output，净输入 = input-cacheRead-cacheWrite。不修会**翻倍**。
 4. **tokscale try/catch**：tokscale 卡住/失败时（尤其 watch tick 的 `--today`），不能让整个 tick reject 抹掉原生数据，否则仪表盘闪烁 active↔waiting。
@@ -249,6 +252,11 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - **验证（与 rebase 前对比）**：rebase 前完整 `npm test` = 2854 tests / 2819 pass / **28 fail**（v0.43 记录，含 macOS Widget / credentialStore Windows `ino`）；rebase 后首次完整跑 = **3105 tests / 3090 pass / 8 fail**（含 Hub registry 指纹未更新）；`npm run update:hub-build` 后 Hub 测试 13/13 全绿，预期 **3105 / 3091 / 7 fail**。测试数 +251（v0.44 新增 Reasonix/fixedPeriod/hubBuild/limitsBurnRate 等）。
 - **剩余 7 个失败全部是环境/预存问题，零代码回归**：①macOS Widget symlink（Windows 无法跑 WidgetKit）；②③`clientDataDirPresence` Cline / Copilot（预存路径）；④`watchIgnoreMatcher` Hermes runtime（v0.43 起 Windows 上 origin/main 也 fail）；⑤`smart collection retries...`（计时超时）；⑥`live collection retries all clients...`（本机真实 cowork 数据污染 mock）；⑦`coalesced targeted refresh reports the replay failure`（同样本机数据污染）。credentialStore Windows `ino` 本轮未复现。我们的专项测试 + clientPartitionInvariants + clientHealth + history + reasonix + hubBuild **全绿**。`npx eslint`（核心改动文件）无告警。
 - 真实数据验证：`collectZcodeUsage` 返回 allTime **1.705B**，模型 `GLM-5.2`（本月/今日为 0，符合当前未使用窗口）；`usageConfigFromSettings` 的 `customModelPricing` 仍是函数 getter。
+
+### 2026-08-14：ZCode 改走上游 tokscale，Cowork 仍原生
+- 上游 tokscale 已扫描 `~/.zcode/cli/db/db.sqlite`（watch 标签 `zcode-cli-db` + `zcode-projects`）。继续原生 merge 会与 tokscale **双计**。
+- **collector**：从 `NATIVE_ONLY_CLIENTS` 去掉 zcode；删除 `collectZcodeUsage` merge 与 `enabledZcode`；history graph 用 `tokscaleClients`（含 zcode，仍剔 proma）；watch 与上游对齐，去掉 `zcode-rollout`；clientHealth allowlist 同步去掉该 id。
+- **保留**：Cowork 原生 merge + `coworkGraph`；tokscale 外层 try/catch；`customModelPricing` getter（Cowork 单价）；`zcodeSession.js` 仅用于会话详情 + 点击白名单 `'zcode'`。
 
 ## 七、已解决问题
 
