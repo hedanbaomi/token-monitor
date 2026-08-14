@@ -124,6 +124,7 @@ function applyComponentSummary(summary, totalTokens, perClient, perModel) {
     models[key] = components;
   }
   return { totals, clients, models };
+}
 
 // Folds tokscale `graph` output (contributions[].clients[]) into a per-day shape where a
 // day's total always equals the sum of its perClient and perModel stacks.
