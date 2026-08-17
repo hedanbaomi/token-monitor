@@ -61,7 +61,7 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 ### 修改文件（核心改动）
 | 文件 | 改动 |
 |---|---|
-| `src/shared/collector.js` | ① `NATIVE_ONLY_CLIENTS = {proma}` + `tokscaleClientsCsv()`：ZCode 走 tokscale，只剔 proma ② tokscale 扫描包 **try/catch**（失败不连累 cowork 原生读取）③ `coworkEnabled`/`zcodePricingMap` ④ cowork 监听路径并入 `claude` ⑤ `collectUsageOnce` 在 tokscale+WSL 后只 merge cowork |
+| `src/shared/collector.js` | ① `NATIVE_ONLY_CLIENTS = {proma, qodercn}` + `tokscaleClientsCsv()`：ZCode 走 tokscale，只剔 Proma/Qoder CN ② tokscale 扫描包 **try/catch**（失败不连累 cowork 原生读取）③ `coworkEnabled`/`zcodePricingMap` ④ cowork 监听路径并入 `claude` ⑤ `collectUsageOnce` 在 tokscale+WSL 后只 merge cowork |
 | `src/shared/sessionDetail.js` | 新增 `readZcodeSessionDetail` 分支 + `readSessionDetail` 的 `if (client === 'zcode')` 分发 |
 | `src/shared/clientTracking.js` | `DEFAULT_CLIENTS` 加 `zcode`（cowork 不加，归 claude） |
 | `src/shared/usage.js` | `normalizeClientName` 加 `zcode`/`z-code` 归一化 |
@@ -257,6 +257,14 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - 上游 tokscale 已扫描 `~/.zcode/cli/db/db.sqlite`（watch 标签 `zcode-cli-db` + `zcode-projects`）。继续原生 merge 会与 tokscale **双计**。
 - **collector**：从 `NATIVE_ONLY_CLIENTS` 去掉 zcode；删除 `collectZcodeUsage` merge 与 `enabledZcode`；history graph 用 `tokscaleClients`（含 zcode，仍剔 proma）；watch 与上游对齐，去掉 `zcode-rollout`；clientHealth allowlist 同步去掉该 id。
 - **保留**：Cowork 原生 merge + `coworkGraph`；tokscale 外层 try/catch；`customModelPricing` getter（Cowork 单价）；`zcodeSession.js` 仅用于会话详情 + 点击白名单 `'zcode'`。
+
+### 2026-08-17 rebase：v0.44.0 → v0.45.0 ⚠️ 多处冲突（Qoder CN 原生适配器 + Hub registry）
+- `git fetch origin` 后 `origin/main` 从 `3afcfe0`(v0.44.0 后续) 前进到 `88a2927`（含 `42511d0` release v0.45.0，以及随后的 session clock / settings / antigravity Windows 路径修复）。`git rebase origin/main` 在 5 个本地提交上冲突，手工解决后本地提交全部重放（`git merge-base --is-ancestor origin/main HEAD` 确认 v0.45 是 HEAD 祖先）。**无 `_resolve_pkg.js` 残留**。备份分支：`backup/pre-v0.45-rebase`。
+- **冲突要点**：上游 v0.45 `#301` 新增 Qoder CN 本地 SQLite 适配器（`qodercn` 进 `localClients`，独立 `qoderCnGraph`）。我们的 Cowork 原生 merge / `coworkGraph` / tokscale 外层 try/catch 与同区域冲突。**解决**：`NATIVE_ONLY_CLIENTS = {proma, qodercn}`，ZCode 仍走 tokscale；`collectHistoryOnce` 同时保留 `qoderCnGraph` 与 `coworkGraph`；history 调用用 `tokscaleClients`（不要把 `qodercn` 再送给 tokscale）；Hub registry 先取上游再 `npm run update:hub-build`。
+- **后续适配**：rebase 结束后把 `collectUsageOnce` 里重复的 `localClients` 过滤改回 `tokscaleClientsCsv()`，避免 eslint unused；刷新 hub core 指纹。
+- **依赖**：Electron **43.3.0 → 43.4.0**（升级前必须关掉 Token Monitor 的 electron，否则 `npm install` EBUSY）；tokscale 仍是 **^4.13.0**。
+- **上游 v0.45 核心改动**（与 zcode/cowork 的交界）：①**Qoder CN 本地用量**（#301——原生 SQLite，不进 tokscale）；②**Command Code**（#411/#421——走 tokscale + 额度）；③**WSL CLI-only ZCode 检测**（#431——上游 watch/诊断，我们不再原生 merge zcode）；④history 日边界由 producer 推导（#428）；⑤会话 period 用注入时钟（#362）；⑥字体/托盘/settings 若干修复。Command Code / Reasonix / ZCode 均不进 `NATIVE_ONLY_CLIENTS`。
+- **验证**：专项测试 zcodeSession / coworkSession / sessionDetail / clientHealth / clientPartitionInvariants / hubBuild **100 pass / 0 fail**。`npx eslint`（核心改动文件）无告警。
 
 ## 七、已解决问题
 
