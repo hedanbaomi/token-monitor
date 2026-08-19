@@ -365,7 +365,11 @@ test('Claude source roots follow CLAUDE_CONFIG_DIR like tokscale', () => {
   os.homedir = () => path.join(path.sep, 'home', 'alice');
   process.env.CLAUDE_CONFIG_DIR = path.join(path.sep, 'srv', 'claude-config');
   try {
-    assert.deepEqual(clientSourceRoots('claude').claude, [
+    // Cowork sandbox roots are independent of CLAUDE_CONFIG_DIR and may be
+    // discovered from the real Desktop install; ignore them here.
+    const claudeRoots = (clientSourceRoots('claude').claude || [])
+      .filter((root) => root.id !== 'cowork-sessions');
+    assert.deepEqual(claudeRoots, [
       { id: 'claude-projects', dir: path.join(path.sep, 'srv', 'claude-config', 'projects') },
       { id: 'claude-transcripts', dir: path.join(path.sep, 'srv', 'claude-config', 'transcripts') }
     ]);
