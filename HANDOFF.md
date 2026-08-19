@@ -61,7 +61,7 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 ### 修改文件（核心改动）
 | 文件 | 改动 |
 |---|---|
-| `src/shared/collector.js` | ① `NATIVE_ONLY_CLIENTS = {proma, qodercn}` + `tokscaleClientsCsv()`：ZCode 走 tokscale，只剔 Proma/Qoder CN ② tokscale 扫描包 **try/catch**（失败不连累 cowork 原生读取）③ `coworkEnabled`/`zcodePricingMap` ④ cowork 监听路径并入 `claude` ⑤ `collectUsageOnce` 在 tokscale+WSL 后只 merge cowork |
+| `src/shared/collector.js` | ① `tokscaleClientsCsv()` 按 `PARSE_LOCAL_CLIENTS`（proma, qodercn）剔原生客户端：ZCode/DSH/Reasonix 走 tokscale ② tokscale 扫描包 **try/catch**（失败不连累 cowork 原生读取）③ `coworkEnabled`/`zcodePricingMap` ④ cowork 监听路径并入 `claude`（独立于 `CLAUDE_CONFIG_DIR`）⑤ `collectUsageOnce` 在 tokscale+WSL 后只 merge cowork |
 | `src/shared/sessionDetail.js` | 新增 `readZcodeSessionDetail` 分支 + `readSessionDetail` 的 `if (client === 'zcode')` 分发 |
 | `src/shared/clientTracking.js` | `DEFAULT_CLIENTS` 加 `zcode`（cowork 不加，归 claude） |
 | `src/shared/usage.js` | `normalizeClientName` 加 `zcode`/`z-code` 归一化 |
@@ -75,7 +75,7 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 2. **cowork 归到 claude**：避免出现"opus(code)"和"opus(cowork)"分开显示。无重复计数（tokscale 读 `~/.claude/projects`，cowork 读沙盒路径，磁盘不重叠）。
 3. **cache-inclusive 修正**（#68）：ZCode input_tokens 含缓存，总量 = input+output，净输入 = input-cacheRead-cacheWrite。不修会**翻倍**。
 4. **tokscale try/catch**：tokscale 卡住/失败时（尤其 watch tick 的 `--today`），不能让整个 tick reject 抹掉原生数据，否则仪表盘闪烁 active↔waiting。
-5. **会话点击白名单**：`app.js` 的 `els.breakdown.addEventListener('click')` 有硬编码 `client !== 'claude' && !== 'codex' && !== 'opencode'`，必须加 `'zcode'` 才能点开会话详情。
+5. **会话点击白名单**：`app.js` 的 `els.breakdown.addEventListener('click')` 有硬编码客户端列表，必须同时保留上游的 `'dsh'`/`'reasonix'` 和我们的 `'zcode'` 才能点开会话详情。
 6. **项目归因**：ZCode 会话需要 `projectId`/`projectLabel` 才能进「项目」视图；从 `session.directory` 用 `hashKey`+`normalizeProjectPath` 算（复刻 collector.js 的 `projectIdentity`，避免循环依赖）。
 
 ## 六、更新维护流程（rebase）
@@ -265,6 +265,15 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - **依赖**：Electron **43.3.0 → 43.4.0**（升级前必须关掉 Token Monitor 的 electron，否则 `npm install` EBUSY）；tokscale 仍是 **^4.13.0**。
 - **上游 v0.45 核心改动**（与 zcode/cowork 的交界）：①**Qoder CN 本地用量**（#301——原生 SQLite，不进 tokscale）；②**Command Code**（#411/#421——走 tokscale + 额度）；③**WSL CLI-only ZCode 检测**（#431——上游 watch/诊断，我们不再原生 merge zcode）；④history 日边界由 producer 推导（#428）；⑤会话 period 用注入时钟（#362）；⑥字体/托盘/settings 若干修复。Command Code / Reasonix / ZCode 均不进 `NATIVE_ONLY_CLIENTS`。
 - **验证**：专项测试 zcodeSession / coworkSession / sessionDetail / clientHealth / clientPartitionInvariants / hubBuild **100 pass / 0 fail**。`npx eslint`（核心改动文件）无告警。
+
+### 2026-08-19 rebase：v0.45.0 → v0.46.0 ⚠️ 会话详情/白名单冲突 + CLAUDE_CONFIG_DIR
+- `git fetch origin` 后 `origin/main` 从 `88a2927` 前进 14 个提交到 `bed9fc3`（`chore: release v0.46.0`）。`git rebase origin/main` 在 4 个本地提交上冲突，手工解决后全部重放（`git merge-base --is-ancestor origin/main HEAD` 确认 v0.46 是 HEAD 祖先）。备份分支：`backup/pre-v0.46-rebase`。
+- **冲突 1**（`sessionDetail.js`）：上游 v0.46 给 `readSessionDetail` 加了 `env`/`useEnvRoots`（配合 `#455` CLAUDE_CONFIG_DIR）。我们的 `readZcodeSessionDetail` 在同处分发。**解决**：保留上游签名，并叠回 zcode 分支。DSH 会话详情在独立模块 `dshSessionDetail.js`，经 `sessionDetailResolver` 分发，不进 `sessionDetail.js`。
+- **冲突 2**（`app.js` 会话点击白名单）：上游加 `'dsh'`，我们加 `'zcode'`。**解决**：两边都留。
+- **冲突 3**（`collector.js` `localClients`）：上游把 native-only 收成 `PARSE_LOCAL_CLIENTS`（`proma`,`qodercn`）。**解决**：`tokscaleClientsCsv()` 改为读该常量，避免再维护一份 `NATIVE_ONLY_CLIENTS`。
+- **后续适配**：`CLAUDE_CONFIG_DIR` 只搬 Claude Code 的 projects/transcripts；Cowork 仍在 Desktop 沙盒，watch roots 继续并入 `claude`。上游新测试 `Claude source roots follow CLAUDE_CONFIG_DIR` 改为忽略 `cowork-sessions` 后再比精确列表。Hub registry 跑 `npm run update:hub-build`。
+- **依赖**：Electron 仍是 **43.4.0**，tokscale 仍是 **^4.13.0**；`npm install` 更新 2 个包（含 Koffi Windows 启动修复 #447）。
+- **上游 v0.46 核心改动**：①**DeepSeek Harness (dsh)** 用量 + 本地会话详情（#408/#427/#448）；②**CLAUDE_CONFIG_DIR** 贯穿 session 路径（#455）；③Windows 托盘图标尺寸（#345/#444）；④Hub 草稿在改上传频率时保留（#433）。DSH 走 tokscale，不进 `PARSE_LOCAL_CLIENTS`。
 
 ## 七、已解决问题
 
