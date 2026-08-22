@@ -25,18 +25,6 @@ If fso.FileExists(fso.BuildPath(scriptDir, "package.json")) Then
   repoRoot = scriptDir
 End If
 
-' Prefer the local electron from node_modules (same one `npm run dev` uses).
-electronExe = fso.BuildPath(repoRoot, "node_modules\.bin\electron.cmd")
-If Not fso.FileExists(electronExe) Then
-  ' Fallback: npm/node on PATH, running the Electron main entry directly.
-  electronExe = "npm.cmd"
-End If
-
-' Run detached (0 = hidden window), don't wait for it to finish (False).
-' Working directory = repoRoot so electron finds package.json + assets.
+' Silently start via npm start (which runs ensure:tokscale and boots electron)
 shell.CurrentDirectory = repoRoot
-If InStrRev(electronExe, "electron.cmd") > 0 Then
-  shell.Run """" & electronExe & """ .", 0, False
-Else
-  shell.Run "cmd /c npm run dev", 0, False
-End If
+shell.Run "cmd.exe /c npm start", 0, False
