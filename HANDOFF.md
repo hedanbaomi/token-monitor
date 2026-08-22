@@ -275,7 +275,40 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - **依赖**：Electron 仍是 **43.4.0**，tokscale 仍是 **^4.13.0**；`npm install` 更新 2 个包（含 Koffi Windows 启动修复 #447）。
 - **上游 v0.46 核心改动**：①**DeepSeek Harness (dsh)** 用量 + 本地会话详情（#408/#427/#448）；②**CLAUDE_CONFIG_DIR** 贯穿 session 路径（#455）；③Windows 托盘图标尺寸（#345/#444）；④Hub 草稿在改上传频率时保留（#433）。DSH 走 tokscale，不进 `PARSE_LOCAL_CLIENTS`。
 
+### 2026-08-23 rebase：v0.46.0 → v0.47.0 ⚠️ collector 冲突合并 + Watcher Worker + Cherry Studio / Trae CN / Workbuddy
+- `git fetch origin` 后 `origin/main` 从 `bed9fc3` 前进 15 个提交到 `5ecc605`（`5b52b35` release v0.47.0 及后续 watcher 优化）。`git rebase origin/main` 在 3 个提交上冲突，手工解决后全部重放（`git merge-base --is-ancestor origin/main HEAD` 确认 v0.47 是 HEAD 祖先）。备份分支：`backup/pre-v0.47-rebase`。
+- **冲突 1**（`collector.js` `localClients` 路由）：上游 v0.47 在 `collectUsageOnce` 引入 `targetTokscaleClientList` / `targetTokscaleClientSet` 并用 `localClients` 过滤。我们用 `tokscaleClientsCsv()`。**解决**：保留 `const localClients = new Set(PARSE_LOCAL_CLIENTS);`，两边结构自然对齐，避免 `unused-variable` 告警。
+- **冲突 2**（`collector.js` targeted scan fallback）：上游 v0.47 #467 加强了不安全定向扫描回退检测（`hasUnsafeTargetedResult`），其内部原调用 `runTokscaleFn`。**解决**：将上游内部的 full scan 调用对接我们的 `scanUsageBundle(tokscaleClients, ['--today'])`，使 Antigravity 本地 SQLite 回退与上游安全防御机制完全互通。
+- **冲突 3**（`hubBuildRegistry.json` / `worker/.../hubBuildRegistry.json`）：上游 v0.47 新增了 core/node/worker 的多项 revision。**解决**：先保留上游 registry，rebase 后执行 `npm run update:hub-build` + `npm run sync:worker` 登记新的 build id。
+- **上游 v0.47 核心改动**：
+  ①**Cherry Studio** 用量追踪（#387——`cherrystudio` 接入 tokscale 路径）；
+  ②**Trae CN 额度**（#483——`traeLimits.js` 接入中国区企业/个人包）；
+  ③**Workbuddy 本地应用额度**（#378——`workbuddyLimits.js` + `workbuddyLocalAuth.js`）；
+  ④**Watcher Worker 异步解耦**（#486——`watcherHost.js` + `watcherWorker.js` 将 chokidar 关闭与事件处理移入 worker thread，消除主线程卡顿）；
+  ⑤**托盘余额百分比**（#470——tray balance meter percentage）；
+  ⑥**Codex OAuth 额度 fallback 优化**（#473）。
+- **保留的本地修改**：
+  ①ZCode 会话详情 (`zcodeSession.js`)、项目归因、点击白名单、自定义单价 getter；
+  ②Claude Cowork 沙盒原生读取 (`coworkSession.js`)、归入 `claude`、历史图表 contribution、watch roots；
+  ③谷歌反重力（Antigravity）Windows 本地 SQLite 只读会话解析与缓存路径修正（tokscale #1129）；
+  ④`launch-background.vbs`、`install-autostart.bat` 等 Windows 守护脚本。
+- **验证**：
+  - 核心/定制测试：`cherryStudio` / `traeLimits` / `workbuddyLimits` / `watcherHost` / `collectorAntigravityLocalFallback` / `zcodeSession` / `coworkSession` / `sessionDetail` 等 140/140 测试通过（139 pass, 1 skipped）；
+  - `clientHealth` (39/39 pass)、`clientPartitionInvariants` (6/6 pass)、`hubBuild` (21/21 pass) 全绿；
+  - `npm run lint`（ESLint）全绿 0 报错；
+  - 真实采集验证：`npm run agent:once -- --dry-run` 采集 Antigravity、Codex、Claude、ZCode 等数据正常。
+
 ## 七、已解决问题
+
+### Windows 下谷歌反重力（Antigravity）用量显示 0 token / 旧缓存卡死 ✅ 已修复（2026-08-23）
+- **现象**：在 Windows 环境下，反重力（Antigravity）token 统计显示为 0 token 或长期停留在旧数据，状态异常。
+- **根因**：Windows 下 tokscale antigravity sync 无法从 DesktopAgent RPC 同步当前会话，导致缓存停留在旧数据；这是上游仍在跟踪的 Windows 问题：[tokscale #1129](https://github.com/junhoyeo/tokscale/issues/1129)。
+- **修复**：
+  1. `src/shared/collector.js`（`runTokscaleAtHome` / `scanAntigravityConversationRoot` / `collectWindowsAntigravityLocalUsage`）：Windows 环境下直接只读解析反重力本地 SQLite 会话（使用安全临时 junction 挂载，并在扫描后严格解除与清理，避免对用户数据库造成任何修改）。
+  2. `src/shared/collector.js`（`mergeAntigravityLocalRows`）：按 session 比对并替换旧缓存，防止重复计数；对无法安全协调的聚合/嵌套格式保持 fail-closed。
+  3. `src/shared/collector.js`（`clientSourceRoots`）：修正 Windows 下 tokscale antigravity 缓存路径，统一使用 `tokscaleConfigDir({ homeDir: home })`。
+  4. `tests/shared/collectorAntigravityLocalFallback.test.js`：新增专项回归测试，覆盖缺失会话补全、旧会话替换、聚合保护、嵌套格式防护、threadId 会话标识以及定向刷新（7/7 全绿）。
+- **结果**：真实采集恢复正常，Antigravity 活跃会话与 Token 准确呈现，状态为 active。
 
 ### 趋势主页（7.1B）与使用仪表盘（5B→6.75B）token 不一致 ✅ 已修复
 - **根因**：主页读 `stats.periods.allTime.totalTokens`（live 周期扫描 + zcode/cowork 原生合并）；仪表盘读 `history.summary.totalTokens`（tokscale graph）。历史 graph 调用原先用 `tokscaleClients`（剔除了 zcode），导致 graph 漏算 zcode 的 1.75B，仪表盘只显示 ~5B。
@@ -297,7 +330,7 @@ npm run check
 :: lint 我们的文件
 npx eslint src/shared/zcodeSession.js src/shared/coworkSession.js src/shared/collector.js src/electron/renderer/app.js src/electron/main.js
 :: 测试
-node --test tests/shared/zcodeSession.test.js tests/shared/coworkSession.test.js tests/shared/sessionDetail.test.js
+node --test tests/shared/zcodeSession.test.js tests/shared/coworkSession.test.js tests/shared/sessionDetail.test.js tests/shared/collectorAntigravityLocalFallback.test.js
 :: 真实数据验证（zcode）
 node -e "const z=require('./src/shared/zcodeSession'); const p=z.collectZcodeUsage({allTimeSince:'2025-01-01'}); console.log(p.allTime.totalTokens, p.allTime.clients);"
 :: 启动
