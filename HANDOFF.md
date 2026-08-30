@@ -319,6 +319,14 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - **本地改动**：ZCode/Cowork/Antigravity 集成、Windows Antigravity 本地镜像与时间戳修复、启动脚本均已保留；本轮开始前的未提交改动已恢复且仍未提交。
 - **验证**：隔离本机 `DSH_HOME` 后 `npm run verify` 为 3779 tests / 3766 pass / 5 fail / 8 skipped。剩余 5 个失败仍是 Windows 本机路径/权限或平台专属测试（macOS symlink、Cline/Copilot/Antigravity 本机数据、Hermes Windows path），不是本轮代码回归。
 
+### 2026-08-30 rebase：v0.49.0 → v0.50.0 ✅ 仅生成 registry 冲突
+- `git fetch origin --prune --tags` 后 `origin/main` 从 `7c74e61` 前进到 `73542b8`：包含正式发布提交 `ffee21c`（tag `v0.50.0`）以及发布后的 Qoder CN Discord 图标和 WSL/Discord 注册一致性保护。创建备份分支 `backup/pre-v0.50-rebase` 后，`git rebase origin/main` 重放 35 个本地提交。
+- 前 34 个本地提交零冲突；最后的 Antigravity 时间戳修复只在 `src/shared/hubBuildRegistry.json` 及 Worker 镜像发生生成内容冲突。保留上游 revision 19–21，完成 rebase 后执行一次 `npm run update:hub-build` 与 `npm run sync:worker`，登记本地 core revision 22；`tests/shared/hubBuild.test.js` 13/13 通过。
+- **依赖**：`npm install` 更新 3 个包；当前版本为 `0.50.0`，`tokscale 4.15.0`、`electron 43.4.0`，npm audit 为 0 vulnerabilities。
+- **上游 v0.50 重点**：LM Studio server-log 用量、Cursor 官方额度池与 Grok Bot、Codex `gpt-reserve`、Windows 任务栏遮挡修复、DSH 模型归因/xAI 200K 成本修复和 Trae CN 配置说明。
+- **本地改动**：ZCode/Cowork、Antigravity Windows fallback、只读 SQLite 镜像与时间戳修复、启动脚本均已保留；未跟踪的 `start.bat` 未加入 Git、未改动。
+- **验证**：更新/定制专项 165/165、Hub build 13/13、DSH 时间戳隔离复核 16/16、ESLint 和 `git diff --check` 通过。完整 `npm run verify` 为 3810 tests / 3792 pass / 10 fail / 8 skipped；其中 5 个 DSH 失败由验证命令人为设置空 `DSH_HOME` 导致，移除覆盖后全部通过，剩余 5 个仍是 Windows symlink 权限或本机 Cline/Copilot/Antigravity/Hermes 路径污染，不是本轮代码回归。
+
 ## 七、已解决问题
 
 ### Windows 下谷歌反重力（Antigravity）用量显示 0 token / 旧缓存卡死 ✅ 已修复（2026-08-23）
