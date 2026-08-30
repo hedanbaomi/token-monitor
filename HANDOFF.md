@@ -298,16 +298,38 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
   - `npm run lint`（ESLint）全绿 0 报错；
   - 真实采集验证：`npm run agent:once -- --dry-run` 采集 Antigravity、Codex、Claude、ZCode 等数据正常。
 
+### 2026-08-27 rebase：v0.47.0 → v0.48.0 ⚠️ history/collector/Hub registry 冲突
+- `git fetch origin` 后 `origin/main` 从 `5ecc605` 前进到 `3e82f76`（含 v0.48.0 及其后的 upstream 修复）。`git rebase origin/main` 重放 34 个本地提交；备份分支：`backup/pre-v0.48-rebase`。
+- **冲突 1**（`history.js` / Worker 镜像）：上游的 Codex/DSH/Reasonix disjoint reasoning 规则与本地 Cowork 图表的 token 字段别名合并保留；两边的历史归并语义均未丢失。
+- **冲突 2**（`collector.js`）：以 v0.48 的 signal-aware tokscale 生命周期为基线，保留 Antigravity Windows fallback，并让本地 fallback 继续遵守 abort、termination 和 capability probe 规则。
+- **冲突 3**（`hubBuildRegistry.json`）：先保留上游 registry，最终执行 `npm run update:hub-build` + `npm run sync:worker`，登记 core revision 17。
+- **依赖**：`npm install` 更新到 `tokscale 4.14.0`、`electron 43.4.0`；`npm ls tokscale electron --depth=0` 核对通过。
+- **上游 v0.48 重点**：Cursor managed multi-account、移除 vendored tokscale override、Kimi Work 用量/项目归因、collector lifecycle/cancellation 及第三方 API Sub2API 账户 preset。
+- **本地未提交修改（rebase 前已存在，已保留）**：
+  ①`antigravityLocalMirror.js`：用只读 `VACUUM INTO` 快照代替 Windows junction，避免实时数据库锁和 symlink 权限问题；
+  ②`antigravityTimestampRepair.js`：从 generation step metadata 修复缺失的 Antigravity generation timestamp，无法安全配对时 fail-closed；
+  ③`tests/shared/antigravityTimestampRepair.test.js`、`start.bat`。
+- **验证**：定制/相关测试 85/85 通过；隔离本机 `DSH_HOME` 后 `npm run verify` 为 3748 tests / 3735 pass / 5 fail / 8 skipped。剩余 5 个失败均为 Windows 本机路径/权限或平台专属测试（macOS symlink、Cline/Copilot/Antigravity 本机数据、Hermes Windows path），不是本轮代码回归。`npm run check` 仍会命中本地旧 `check` 脚本引用的缺失文件 `scripts/build-icons.js`，与上游 v0.48 无关。
+
+### 2026-08-28 rebase：v0.48.0 → v0.49.0 ✅ 零冲突
+- `git fetch origin` 后 `origin/main` 从 `3e82f76` 前进到 `7c74e61`（v0.49.0）。`git rebase origin/main` 重放 34 个本地提交，零冲突；备份分支：`backup/pre-v0.49-rebase`。
+- 上游 registry 的新 revision 17/18 已保留，随后执行 `npm run update:hub-build` + `npm run sync:worker`，重新登记当前本地 core revision。
+- **依赖**：`npm install` 更新 1 个包；当前版本为 `0.49.0`，`tokscale 4.14.0`、`electron 43.4.0`，npm audit 为 0 vulnerabilities。
+- **上游 v0.49 重点**：Volcengine Agent Plan quota、Windows 安装目录 AppContainer ACL、更新时保留规范化 settings、Grok/Trae/WSL 额度修复，以及 js-yaml 更新。
+- **本地改动**：ZCode/Cowork/Antigravity 集成、Windows Antigravity 本地镜像与时间戳修复、启动脚本均已保留；本轮开始前的未提交改动已恢复且仍未提交。
+- **验证**：隔离本机 `DSH_HOME` 后 `npm run verify` 为 3779 tests / 3766 pass / 5 fail / 8 skipped。剩余 5 个失败仍是 Windows 本机路径/权限或平台专属测试（macOS symlink、Cline/Copilot/Antigravity 本机数据、Hermes Windows path），不是本轮代码回归。
+
 ## 七、已解决问题
 
 ### Windows 下谷歌反重力（Antigravity）用量显示 0 token / 旧缓存卡死 ✅ 已修复（2026-08-23）
 - **现象**：在 Windows 环境下，反重力（Antigravity）token 统计显示为 0 token 或长期停留在旧数据，状态异常。
 - **根因**：Windows 下 tokscale antigravity sync 无法从 DesktopAgent RPC 同步当前会话，导致缓存停留在旧数据；这是上游仍在跟踪的 Windows 问题：[tokscale #1129](https://github.com/junhoyeo/tokscale/issues/1129)。
 - **修复**：
-  1. `src/shared/collector.js`（`runTokscaleAtHome` / `scanAntigravityConversationRoot` / `collectWindowsAntigravityLocalUsage`）：Windows 环境下直接只读解析反重力本地 SQLite 会话（使用安全临时 junction 挂载，并在扫描后严格解除与清理，避免对用户数据库造成任何修改）。
+  1. `src/shared/collector.js`（`runTokscaleAtHome` / `scanAntigravityConversationRoot` / `collectWindowsAntigravityLocalUsage`）：Windows 环境下直接只读解析反重力本地 SQLite 会话（当前通过 `antigravityLocalMirrorHome` 创建安全临时快照，避免直接 junction 读取实时数据库）。
   2. `src/shared/collector.js`（`mergeAntigravityLocalRows`）：按 session 比对并替换旧缓存，防止重复计数；对无法安全协调的聚合/嵌套格式保持 fail-closed。
   3. `src/shared/collector.js`（`clientSourceRoots`）：修正 Windows 下 tokscale antigravity 缓存路径，统一使用 `tokscaleConfigDir({ homeDir: home })`。
-  4. `tests/shared/collectorAntigravityLocalFallback.test.js`：新增专项回归测试，覆盖缺失会话补全、旧会话替换、聚合保护、嵌套格式防护、threadId 会话标识以及定向刷新（7/7 全绿）。
+  4. `src/shared/antigravityTimestampRepair.js`：从可配对的 generation step metadata 修复缺失时间戳；`antigravityLocalMirror.js` 保留最后一次成功快照，数据库更新或修复失败时重试而不覆盖好快照。
+  5. `tests/shared/collectorAntigravityLocalFallback.test.js` / `tests/shared/antigravityTimestampRepair.test.js`：覆盖缺失会话补全、旧会话替换、聚合保护、嵌套格式防护、threadId 会话标识、时间戳修复、快照复用和 fail-closed（12/12 全绿）。
 - **结果**：真实采集恢复正常，Antigravity 活跃会话与 Token 准确呈现，状态为 active。
 
 ### 趋势主页（7.1B）与使用仪表盘（5B→6.75B）token 不一致 ✅ 已修复
