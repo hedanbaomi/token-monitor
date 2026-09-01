@@ -317,15 +317,28 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - **依赖**：`npm install` 更新 1 个包；当前版本为 `0.49.0`，`tokscale 4.14.0`、`electron 43.4.0`，npm audit 为 0 vulnerabilities。
 - **上游 v0.49 重点**：Volcengine Agent Plan quota、Windows 安装目录 AppContainer ACL、更新时保留规范化 settings、Grok/Trae/WSL 额度修复，以及 js-yaml 更新。
 - **本地改动**：ZCode/Cowork/Antigravity 集成、Windows Antigravity 本地镜像与时间戳修复、启动脚本均已保留；本轮开始前的未提交改动已恢复且仍未提交。
-- **验证**：隔离本机 `DSH_HOME` 后 `npm run verify` 为 3779 tests / 3766 pass / 5 fail / 8 skipped。剩余 5 个失败仍是 Windows 本机路径/权限或平台专属测试（macOS symlink、Cline/Copilot/Antigravity 本机数据、Hermes Windows path），不是本轮代码回归。
-
-### 2026-08-30 rebase：v0.49.0 → v0.50.0 ✅ 仅生成 registry 冲突
-- `git fetch origin --prune --tags` 后 `origin/main` 从 `7c74e61` 前进到 `73542b8`：包含正式发布提交 `ffee21c`（tag `v0.50.0`）以及发布后的 Qoder CN Discord 图标和 WSL/Discord 注册一致性保护。创建备份分支 `backup/pre-v0.50-rebase` 后，`git rebase origin/main` 重放 35 个本地提交。
-- 前 34 个本地提交零冲突；最后的 Antigravity 时间戳修复只在 `src/shared/hubBuildRegistry.json` 及 Worker 镜像发生生成内容冲突。保留上游 revision 19–21，完成 rebase 后执行一次 `npm run update:hub-build` 与 `npm run sync:worker`，登记本地 core revision 22；`tests/shared/hubBuild.test.js` 13/13 通过。
-- **依赖**：`npm install` 更新 3 个包；当前版本为 `0.50.0`，`tokscale 4.15.0`、`electron 43.4.0`，npm audit 为 0 vulnerabilities。
-- **上游 v0.50 重点**：LM Studio server-log 用量、Cursor 官方额度池与 Grok Bot、Codex `gpt-reserve`、Windows 任务栏遮挡修复、DSH 模型归因/xAI 200K 成本修复和 Trae CN 配置说明。
-- **本地改动**：ZCode/Cowork、Antigravity Windows fallback、只读 SQLite 镜像与时间戳修复、启动脚本均已保留；未跟踪的 `start.bat` 未加入 Git、未改动。
-- **验证**：更新/定制专项 165/165、Hub build 13/13、DSH 时间戳隔离复核 16/16、ESLint 和 `git diff --check` 通过。完整 `npm run verify` 为 3810 tests / 3792 pass / 10 fail / 8 skipped；其中 5 个 DSH 失败由验证命令人为设置空 `DSH_HOME` 导致，移除覆盖后全部通过，剩余 5 个仍是 Windows symlink 权限或本机 Cline/Copilot/Antigravity/Hermes 路径污染，不是本轮代码回归。
+### 2026-09-01 rebase：v0.50.0 → v0.51.0 ⚠️ collector / Hub registry 冲突合并
+- `git fetch origin` 后 `origin/main` 从 `73542b8` 前进到 `36307e7`（包含发布提交 `f8fc74f` / tag `v0.51.0` 及其后续提交）。创建备份分支 `backup/pre-v0.51-rebase`，使用 `git rebase origin/main` 重放本地提交。
+- **冲突 1**（`collector.js`）：上游 `1ca4175`（stale sync lock 修复，在 `maybeSyncAntigravity` 中增加 `syncLockPath` 参数）与本地 Antigravity Windows local fallback 分支合并，使 `maybeSyncAntigravity` 在受保护调用的同时传递 `syncLockPath`。
+- **冲突 2**（`hubBuildRegistry.json` 及 Worker 镜像）：保留上游 registry 历史，rebase 完成后运行 `npm run update:hub-build` + `npm run sync:worker`，重新注册最新 build hashes。
+- **依赖**：`npm install` 检查通过，当前版本 `0.51.0`，`tokscale 4.15.0`，0 vulnerabilities。
+- **上游 v0.51 重点**：
+  - Antigravity 独立多账号 OAuth 额度解析与登录面板 (`antigravityOAuth.js` / `antigravityOAuthLogin.js`)；
+  - Codex 额度重置预测 (`codexResetForecast.js`)；
+  - 仪表盘新增按工具模型细分 (`per-tool model breakdown`)；
+  - 导出模块新增每日模型用量 CSV (`daily-models.csv`)；
+  - Windows 任务栏 Z-order 保持与前台激活优化 (`windowsTaskbarZOrder.js`)；
+  - 渲染器在隐藏/非激活状态下暂停渲染性能优化。
+- **保留的本地修改**：
+  - ZCode 会话详情 (`zcodeSession.js`)、项目归因、点击白名单、自定义单价 getter；
+  - Claude Cowork 沙盒原生读取 (`coworkSession.js`)、归入 `claude`、历史 contribution 图表、独立 watch roots；
+  - 谷歌反重力（Antigravity）Windows 本地 SQLite 只读会话解析与缓存路径修正（tokscale #1129）；
+  - `launch-background.vbs`、`start.bat`、`install-autostart.bat` 等 Windows 启动/守护脚本。
+- **验证**：
+  - 核心/定制测试：166/166 全部通过（`zcodeSession`, `coworkSession`, `sessionDetail`, `collectorAntigravityLocalFallback`, `cherryStudio`, `traeLimits`, `workbuddyLimits`, `watcherHost`, `clientHealth`, `clientPartitionInvariants`, `hubBuild`）；
+  - 上游新特性测试：137/137 全部通过（`antigravityLimits`, `antigravityOAuth`, `exporter`, `limits`, `codexResetForecast`, `antigravityOAuthLogin`）；
+  - ESLint：`npm run lint` 全绿（0 errors / 0 warnings）；
+  - `git diff --check`：Clean。
 
 ## 七、已解决问题
 
