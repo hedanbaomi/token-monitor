@@ -334,11 +334,29 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
   - Claude Cowork 沙盒原生读取 (`coworkSession.js`)、归入 `claude`、历史 contribution 图表、独立 watch roots；
   - 谷歌反重力（Antigravity）Windows 本地 SQLite 只读会话解析与缓存路径修正（tokscale #1129）；
   - `launch-background.vbs`、`start.bat`、`install-autostart.bat` 等 Windows 启动/守护脚本。
+### 2026-09-03 rebase：v0.51.0 → v0.52.0 ⚠️ collector / Hub registry 冲突合并
+- `git fetch origin --prune --tags` 后 `origin/main` 从 `36307e7` 前进到 `00ded79`（包含发布提交 `a2ff67a` / tag `v0.52.0` 及其后续提交）。创建备份分支 `backup/pre-v0.52-rebase`，使用 `git rebase origin/main` 重放本地提交。
+- **冲突 1**（`collector.js`）：上游引入 `tokscaleHomeDir`，与本地导入的 `antigravityLocalMirrorHome` 合并。
+- **冲突 2**（`hubBuildRegistry.json` 及 Worker 镜像）：保留上游 registry 历史，rebase 完成后运行 `npm run update:hub-build` + `npm run sync:worker`，重新注册最新 build hashes。
+- **依赖**：`npm install` 自动升级 `tokscale` 到 `4.15.1`，当前版本 `0.52.0`。
+- **上游 v0.52 重点**：
+  - Zed 仪表盘计费限额 (`zedLimits.js`)；
+  - 模型按 Token 或费用排序与柱状图对比 (`breakdownRenderPolicy.js`)；
+  - 设置页面监控工具和限额提供商搜索过滤 (`settingsListFilter.js`)；
+  - 隐藏任务栏/Dock 图标设置 (`trayModeSettings.js`)；
+  - Cursor Tokscale 缓存主目录探测修复 (`tokscaleConfig.js`)；
+  - 渲染器基础字号与隐藏规则重构。
+- **保留的本地修改**：
+  - ZCode 会话详情 (`zcodeSession.js`)、项目归因、点击白名单、自定义单价 getter；
+  - Claude Cowork 沙盒原生读取 (`coworkSession.js`)、归入 `claude`、历史 contribution 图表、独立 watch roots；
+  - 谷歌反重力（Antigravity）Windows 本地 SQLite 只读会话解析与缓存路径修正（tokscale #1129）；
+  - `launch-background.vbs`、`start.bat`、`install-autostart.bat` 等 Windows 启动/守护脚本。
 - **验证**：
-  - 核心/定制测试：166/166 全部通过（`zcodeSession`, `coworkSession`, `sessionDetail`, `collectorAntigravityLocalFallback`, `cherryStudio`, `traeLimits`, `workbuddyLimits`, `watcherHost`, `clientHealth`, `clientPartitionInvariants`, `hubBuild`）；
-  - 上游新特性测试：137/137 全部通过（`antigravityLimits`, `antigravityOAuth`, `exporter`, `limits`, `codexResetForecast`, `antigravityOAuthLogin`）；
+  - 核心/定制测试：168/168 全部通过（`zcodeSession`, `coworkSession`, `sessionDetail`, `collectorAntigravityLocalFallback`, `cherryStudio`, `traeLimits`, `workbuddyLimits`, `watcherHost`, `clientHealth`, `clientPartitionInvariants`, `hubBuild`）；
+  - 上游新特性测试：75/75 全部通过（`zedLimits`, `breakdownRenderPolicy`, `settingsListSearch`, `settingsListFilter`, `trayModeSettings`, `usageAttributionRows`, `rendererCssBase`）；
   - ESLint：`npm run lint` 全绿（0 errors / 0 warnings）；
-  - `git diff --check`：Clean。
+  - `git diff --check`：Clean；
+  - 真实采集：`npm run agent:once -- --dry-run` 采集正常。
 
 ## 七、已解决问题
 
