@@ -351,9 +351,26 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
   - Claude Cowork 沙盒原生读取 (`coworkSession.js`)、归入 `claude`、历史 contribution 图表、独立 watch roots；
   - 谷歌反重力（Antigravity）Windows 本地 SQLite 只读会话解析与缓存路径修正（tokscale #1129）；
   - `launch-background.vbs`、`start.bat`、`install-autostart.bat` 等 Windows 启动/守护脚本。
+### 2026-09-05 rebase：v0.52.0 → v0.54.0 ⚠️ Hub registry 冲突合并
+- `git fetch origin --prune --tags` 后 `origin/main` 从 `00ded79` 前进到 `52bed5f`（包含发布提交 `0b17b1e` / tag `v0.53.0` 与 `fce070c` / tag `v0.54.0` 及其后续提交）。创建备份分支 `backup/pre-v0.54-rebase`，使用 `git rebase origin/main` 重放本地提交。
+- **冲突**（`hubBuildRegistry.json` 及 Worker 镜像）：仅在此处冲突，保留上游 registry 历史，rebase 完成后运行 `npm run update:hub-build` + `npm run sync:worker`，重新注册最新 build hashes。
+- **依赖**：`npm install` 自动应用依赖安全补丁，当前版本 `0.54.0`，0 vulnerabilities。
+- **上游 v0.53 & v0.54 重点**：
+  - 统一客户端目录架构 (`clientCatalog.js`)：单点维护客户端标识、标签与显示配置，本地 `zcode` 自然融入；
+  - 统一限额服务商目录架构 (`limitProviders.js`)：统一限额提供商定义；
+  - 阿里百炼（Alibaba）Token Plan 额度监控 (`alibabaLimits.js`，支持个人与团队控制台)；
+  - Unsloth Studio 用量追踪 (`unsloth`)；
+  - Codex 重置预测类型展示 (`codexResetForecast.js`)；
+  - 设置页面渲染性能提升（移除无用追赶重绘）；
+  - 小工具标题栏悬停控件稳定性优化。
+- **保留的本地修改**：
+  - ZCode 会话详情 (`zcodeSession.js`)、项目归因、点击白名单、自定义单价 getter；
+  - Claude Cowork 沙盒原生读取 (`coworkSession.js`)、归入 `claude`、历史 contribution 图表、独立 watch roots；
+  - 谷歌反重力（Antigravity）Windows 本地 SQLite 只读会话解析与缓存路径修正（tokscale #1129）；
+  - `launch-background.vbs`、`start.bat`、`install-autostart.bat` 等 Windows 启动/守护脚本。
 - **验证**：
   - 核心/定制测试：168/168 全部通过（`zcodeSession`, `coworkSession`, `sessionDetail`, `collectorAntigravityLocalFallback`, `cherryStudio`, `traeLimits`, `workbuddyLimits`, `watcherHost`, `clientHealth`, `clientPartitionInvariants`, `hubBuild`）；
-  - 上游新特性测试：75/75 全部通过（`zedLimits`, `breakdownRenderPolicy`, `settingsListSearch`, `settingsListFilter`, `trayModeSettings`, `usageAttributionRows`, `rendererCssBase`）；
+  - 上游新特性测试：79/79 全部通过（`clientCatalog`, `clientRegistrationConsistency`, `limitProviders`, `rendererClientLabels`, `alibabaLimits`, `unsloth`）；
   - ESLint：`npm run lint` 全绿（0 errors / 0 warnings）；
   - `git diff --check`：Clean；
   - 真实采集：`npm run agent:once -- --dry-run` 采集正常。
