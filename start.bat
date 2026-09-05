@@ -1,9 +1,5 @@
-﻿@echo off
-chcp 65001 >nul
+@echo off
 cd /d "%~dp0"
-echo [Token Monitor] 正在启动...
+echo Starting Token Monitor...
 npm start
-if errorlevel 1 (
-  echo [!] 启动异常退出，按任意键关闭...
-  pause >nul
-)
+if errorlevel 1 pause
