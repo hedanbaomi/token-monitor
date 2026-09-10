@@ -441,3 +441,71 @@ test('collectWslUsage logs and skips a home that throws, keeps others', async ()
   assert.equal(logs.length, 1);
   assert.match(logs[0], /Debian/);
 });
+
+// dsh is parse-local (see providers/dsh/usage.js) so it never reaches the WSL
+// tokscale CSV. A DSH-only home therefore has to be read natively, the same way
+// a Proma-only home is, or making dsh parse-local would silently drop every
+// distro's DSH usage instead of only the host's.
+test('collectWslUsage parses DSH-only WSL homes without calling tokscale', async () => {
+  const home = '\\\\wsl$\\Ubuntu\\home\\u';
+  const now = new Date('2026-09-10T08:00:00.000Z');
+  const seen = [];
+  let tokscaleCalls = 0;
+  const { bundle, detected } = await collectWslUsage(
+    {
+      clients: '',
+      trackedClients: 'dsh',
+      allTimeSince: '2025-01-01',
+      commandTimeoutMs: 1000,
+      now,
+      collectDshPeriods: async (options) => {
+        seen.push(options);
+        return {
+          today: { totalTokens: 9 },
+          month: { totalTokens: 20 },
+          allTime: { totalTokens: 30 }
+        };
+      },
+      runTokscale: async () => { tokscaleCalls += 1; return { entries: [] }; }
+    },
+    {
+      platform: 'win32',
+      exec: (cmd) => (cmd === 'reg' ? 'Lxss' : 'Ubuntu\n'),
+      readdirSync: () => ['u'],
+      existsSync: (p) => p === `${home}\\.dsh\\sessions`
+    }
+  );
+
+  assert.deepEqual(detected, ['dsh']);
+  assert.equal(tokscaleCalls, 0, 'a parse-local client must not be handed to the WSL tokscale scan');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].sessionsRoot, `${home}\\.dsh\\sessions`);
+  assert.equal(seen[0].now, now);
+  assert.equal(seen[0].allTimeSince, '2025-01-01');
+  assert.equal(bundle.today.totalTokens, 9);
+  assert.equal(bundle.month.totalTokens, 20);
+  assert.equal(bundle.allTime.totalTokens, 30);
+});
+
+test('collectWslUsage skips the DSH read when the home has no DSH transcripts', async () => {
+  let called = 0;
+  const { bundle, detected } = await collectWslUsage(
+    {
+      clients: '',
+      trackedClients: 'dsh',
+      allTimeSince: '2025-01-01',
+      commandTimeoutMs: 1000,
+      now: new Date('2026-09-10T08:00:00.000Z'),
+      collectDshPeriods: async () => { called += 1; return { today: {}, month: {}, allTime: {} }; }
+    },
+    {
+      platform: 'win32',
+      exec: (cmd) => (cmd === 'reg' ? 'Lxss' : 'Ubuntu\n'),
+      readdirSync: () => ['u'],
+      existsSync: (p) => p.endsWith('\\.claude\\projects')
+    }
+  );
+  assert.equal(called, 0);
+  assert.equal(detected.length, 0);
+  assert.equal(bundle.today.totalTokens, 0);
+});

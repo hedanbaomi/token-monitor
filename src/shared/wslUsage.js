@@ -257,6 +257,26 @@ async function collectWslUsage(options = {}, deps = {}) {
         if (typeof logger === 'function') logger(`wsl Proma usage parse failed for ${home}: ${error.message}`);
       }
     }
+    // DSH is parse-local (see providers/dsh/usage.js), so a WSL home has to be
+    // read natively too. This is a correctness requirement independent of the
+    // versioned file name: tokscale resolves DSH from the DSH_HOME environment
+    // variable, so a per-home scan never redirects it and would silently read
+    // the host's ~/.dsh for every distro.
+    if (tracked.has('dsh') && homeDataClients.includes('dsh') && typeof options.collectDshPeriods === 'function') {
+      try {
+        const dsh = await options.collectDshPeriods({
+          sessionsRoot: wslHomePath(home, '.dsh/sessions'),
+          now,
+          allTimeSince
+        });
+        bundle.today = mergePeriods(bundle.today, dsh.today);
+        bundle.month = mergePeriods(bundle.month, dsh.month);
+        bundle.allTime = mergePeriods(bundle.allTime, dsh.allTime);
+      } catch (error) {
+        if (typeof logger === 'function') logger(`wsl DSH usage parse failed for ${home}: ${error.message}`);
+      }
+    }
+
     // Tokscale 4.6+ keeps explicit --home scans isolated from host-native roots,
     // so every requested client can be passed through for each discovered home.
     // Keep the empty guard because an empty --client expands to all clients.

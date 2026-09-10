@@ -64,7 +64,10 @@
     { id: 'proma', label: 'Proma', locallyParsed: true },
     { id: 'qodercn', label: 'Qoder CN', defaultTracked: false, locallyParsed: true },
     { id: 'reasonix', label: 'Reasonix' },
-    { id: 'dsh', label: 'DeepSeek Harness' },
+    // locallyParsed: the versioned transcript a v3 harness writes is not a name
+    // the pinned tokscale build's dsh reader matches, so the aggregate is read by
+    // providers/dsh/usage.js instead.
+    { id: 'dsh', label: 'DeepSeek Harness', locallyParsed: true },
     { id: 'cherrystudio', label: 'Cherry Studio' },
     { id: 'lmstudio', label: 'LM Studio' },
     { id: 'unsloth', label: 'Unsloth' }

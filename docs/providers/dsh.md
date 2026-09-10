@@ -8,12 +8,14 @@ read_when:
 
 # DeepSeek Harness (dsh) provider
 
-DSH has two data planes, and they are deliberately separate:
+DSH is a **parse-local** client (`locallyParsed: true` in `CLIENT_CATALOG`): the shared
+collector reads its transcripts itself and `tokscale` is never asked for `dsh`, so the
+records, the periods and the history graph all come from one implementation.
 
 | Data plane | Read by | Source |
 | --- | --- | --- |
-| Token usage (periods, dashboard, history) | the shared usage collector, through `tokscale` | DSH session transcripts, parsed by tokscale's `dsh.rs` |
-| Session Detail (per-turn breakdown, prompts) | `providers/dsh/sessionDetail.js`, on demand | the same transcripts, parsed locally |
+| Token usage (periods, dashboard, history) | the shared usage collector, via `providers/dsh/usage.js` | DSH session transcripts |
+| Session Detail (per-turn breakdown, prompts) | `providers/dsh/sessionDetail.js`, on demand | the same transcripts |
 
 ## Where the data lives
 
@@ -67,20 +69,28 @@ and tokscale subtracts then re-adds reasoning, so the net total is reasoning-inc
 Subtracting here would under-count every reasoning-heavy session by exactly its reasoning
 tokens.
 
-## Usage totals stay on the tokscale path
+## Usage totals
 
-The collector does not read dsh transcripts for period or dashboard totals. When the pinned
-tokscale build learns the versioned name, the sessions become visible through the normal scan
-with no widget-side change:
+`usage.js` walks `<dshHome>/sessions/**`, decodes the zstd frames through `sessionFiles.js` and
+emits tokscale-shaped JSON for the periods plus a contribution graph, so `collector.js` merges
+it exactly like `proma`/`qodercn` and the dashboard and the homepage cannot disagree.
 
-- tokscale's `dsh.rs` parses these records correctly once they are exposed under a name it
-  matches — verified by exposing a v3 transcript under the unversioned name, which reproduced
-  the exact token/message counts;
-- it also unions every matched transcript of one session and dedupes by record signature, so a
-  home that kept both encodings is not double-counted (verified: the same records under two
-  matched names still report one session's count, and so does a partial copy beside a complete
-  one).
+Invariants:
 
-One caveat for that fix: tokscale resolves DSH from the `DSH_HOME` environment variable, so
-`--home <dir>` does not redirect it. A per-home scan (the WSL path) therefore keeps reading the
-host's `~/.dsh` unless `DSH_HOME` is set for the child process.
+- **Counted once.** An upgrade can leave two transcripts of one session on disk. They describe
+  the same calls, so rows are deduped on `(session, time, routing, token signature)`.
+- **Local midnight.** Periods bucket on the device's own calendar day and the graph keys are
+  local dates, like every other client.
+- **A partition of its own.** DSH merges before the collector's anchor snapshot and records
+  `todayPartitions.dsh`; see the parse-local note in AGENTS.md.
+- **Pricing.** Transcripts carry no cost, so rows are priced through the shared
+  `resolveModelPricing()`; an unpriceable model stays at `0`.
+- **Per-transcript cache.** Parsed rows are cached by `(size, mtime)`, so a watch tick only
+  re-reads what the harness actually appended.
+
+## WSL
+
+A running distro's `~/.dsh/sessions` is read natively over `\\wsl$`
+(`collectDshPeriods` in `wslUsage.js`), because tokscale resolves DSH from the `DSH_HOME`
+environment variable rather than `--home`: a per-home scan cannot redirect it, so every
+distro would otherwise be answered from the host's `~/.dsh`.

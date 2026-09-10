@@ -7,8 +7,9 @@
  * only when the user opens a session in the widget and are never uploaded.
  *
  * Record-level parsing (which lines count, fork seeding, replayed-line dedupe)
- * lives in one place — dshTranscriptRecords below — so parseDshDetailEvents is a
- * thin projection over it rather than a second reading of the same format.
+ * lives in dshTranscriptRecords below, shared with the aggregate usage adapter
+ * (./usage.js) so Session Detail and the period totals can never disagree about
+ * what a session spent.
  */
 
 const fs = require('node:fs');
@@ -71,10 +72,11 @@ function usageTokens(usage) {
   });
 }
 
-// One pass over a transcript's records, returning the parsed `session` header
-// plus normalized entries — either a prompt (`kind: 'prompt'`) or one billable
-// model call (`kind: 'usage'`). parseDshDetailEvents below is a projection over
-// this, so the rules that decide which records count are stated once.
+// One pass over a transcript's records, shared by the aggregate usage adapter
+// (./usage.js) and by Session Detail below so the two can never disagree about
+// which records count. Returns the parsed `session` header plus normalized
+// entries — either a prompt (`kind: 'prompt'`) or one billable model call
+// (`kind: 'usage'`).
 //
 // Everything in here exists because tokscale's dsh.rs does it too, and a second
 // implementation that got it slightly wrong would disagree with the totals the
@@ -245,6 +247,7 @@ function readDshSessionDetail({ sessionId, period = 'total', sessionCost = 0, ho
 }
 
 module.exports = {
+  dshTranscriptRecords,
   findDshSessionFile,
   parseDshDetailEvents,
   readDshSessionDetail

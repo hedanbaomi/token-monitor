@@ -56,6 +56,7 @@ const {
 const { resolveReasonixStatsDir, REASONIX_SOURCE_CHECK_ID } = require('./providers/reasonix/paths');
 const { resolveDshSessionsDir, DSH_SOURCE_CHECK_ID } = require('./providers/dsh/paths');
 const { indexDshSessionHeaders, readDshSessionHeader, resolveDshSessionsRoot } = require('./providers/dsh/sessionFiles');
+const dshUsage = require('./providers/dsh/usage');
 const {
   createReasonixNativeSessionCache,
   isReasonixNativeSessionPath,
@@ -1228,6 +1229,12 @@ async function collectHistoryOnce(options) {
     rawGraphs.push(options.qoderCnGraph);
     histories.push(normalizeHistory(parseGraphResult(options.qoderCnGraph), { capDays, todayKey }));
   }
+  // tokscale's graph is as blind to dsh as its scan is, so dsh's daily
+  // contributions come from the same native rows.
+  if (options.dshGraph) {
+    rawGraphs.push(options.dshGraph);
+    histories.push(normalizeHistory(parseGraphResult(options.dshGraph), { capDays, todayKey }));
+  }
   if (options.dailyHistoryArchiveEnabled) {
     try {
       const retainedGraph = retainDailyHistory(rawGraphs, {
@@ -1322,6 +1329,7 @@ async function collectUsageOnce(options) {
   const tokscaleClients = normalizedClients ? normalizedClients.split(',').filter((c) => !localClients.has(c)).join(',') : normalizedClients;
   const includesProma = normalizedClients.split(',').includes('proma');
   const includesQoderCn = normalizedClients.split(',').includes('qodercn');
+  const includesDsh = normalizedClients.split(',').includes('dsh');
   const trackedClientSet = new Set(normalizedClients.split(',').filter(Boolean));
   const targetClients = [...new Set(normalizeClientsCsv(options.targetClients).split(',').filter((client) => trackedClientSet.has(client)))];
   const targetRequested = targetClients.length > 0;
@@ -1348,6 +1356,9 @@ async function collectUsageOnce(options) {
   let promaPeriods = null;
   let promaRows = null;
   let promaPricing = null;
+  let dshRows = null;
+  let dshPeriods = null;
+  let dshPricingByModel = {};
   let qoderCnPeriods = null;
   let qoderCnRows = null;
   let qoderCnPricing = null;
@@ -1358,6 +1369,34 @@ async function collectUsageOnce(options) {
     if (qoderCnPeriods?.today && progress.today) progress.today = mergePeriods(progress.today, qoderCnPeriods.today);
     if (qoderCnPeriods?.month && progress.month) progress.month = mergePeriods(progress.month, qoderCnPeriods.month);
     try { options.onProgress({ ...progress, updatedAt: new Date().toISOString() }); } catch (_) {}
+  };
+  // DeepSeek Harness usage, read from its own transcripts. Shared by the host read
+  // and the WSL one so both price and bucket rows identically. Pricing goes
+  // through the same cached lookup every other local adapter uses (tokscale's
+  // `pricing` command, which honours the user's custom-pricing file, with the
+  // on-disk catalog as the offline fallback), so a model nobody can price stays
+  // at 0 rather than borrowing an unrelated vendor's rate.
+  const readDshRowsAndPricing = async ({ homeDir, sessionsRoot }) => {
+    const rows = dshUsage.collectDshRows({ homeDir, sessionsRoot, env: options.env, platform: platformValue });
+    const pricingByModel = await resolveModelPricing(rows, {
+      lookupModelPricing: options.lookupModelPricing,
+      commandTimeoutMs: options.pricingTimeoutMs ?? Math.min(commandTimeoutMs || PROMA_PRICING_LOOKUP_TIMEOUT_MS, PROMA_PRICING_LOOKUP_TIMEOUT_MS),
+      pricingRevision: options.pricingRevision
+    });
+    return { rows, pricingByModel };
+  };
+  const readDshPeriods = async ({ homeDir, sessionsRoot, now, allTimeSince: since }) => {
+    const { rows, pricingByModel } = await readDshRowsAndPricing({ homeDir, sessionsRoot });
+    const json = dshUsage.buildDshPeriods({ now, allTimeSince: since, rows, pricingByModel });
+    return {
+      rows,
+      pricingByModel,
+      periods: {
+        today: extractUsageFromTokscale(json.today),
+        month: extractUsageFromTokscale(json.month),
+        allTime: extractUsageFromTokscale(json.allTime)
+      }
+    };
   };
   if (normalizedClients) {
     const syncClients = targetRequested ? targetTokscaleClients : tokscaleClients;
@@ -1396,6 +1435,21 @@ async function collectUsageOnce(options) {
         };
       } catch (err) {
         if (typeof options.logger === 'function') options.logger(`proma parse failed: ${err.message}`);
+      }
+    }
+    if (includesDsh && (!targetRequested || targetClients.includes('dsh'))) {
+      try {
+        const dshRead = await readDshPeriods({ homeDir: options.homeDir, now: collectedAt, allTimeSince });
+        dshRows = dshRead.rows;
+        dshPricingByModel = dshRead.pricingByModel;
+        dshPeriods = dshRead.periods;
+        // The rows carry each call's time, but the transcript header's createdAt
+        // and the file's mtime are better bounds for "session started" and "last
+        // used", and only applySessionTimestamps (through the same cached tree walk)
+        // knows them. The tokscale pass has already run, so decorate here.
+        decorateLocalPeriods(dshPeriods, { retryMisses: true });
+      } catch (err) {
+        if (typeof options.logger === 'function') options.logger(`dsh usage read failed: ${err.message}`);
       }
     }
     if (includesQoderCn && (!targetRequested || targetClients.includes('qodercn'))) {
@@ -1468,6 +1522,7 @@ async function collectUsageOnce(options) {
         }
       }
       if (promaPeriods) freshPartitions.proma = promaPeriods.today;
+      if (dshPeriods) freshPartitions.dsh = dshPeriods.today;
       if (qoderCnPeriods) freshPartitions.qodercn = qoderCnPeriods.today;
       if (qoderCnPeriodReadFailed && anchor.todayPartitions?.qodercn) {
         // A transient local.db read failure must not turn the existing Qoder CN
@@ -1535,6 +1590,19 @@ async function collectUsageOnce(options) {
       allTime = mergePeriods(allTime, promaPeriods.allTime);
       todayPartitions = { ...(todayPartitions || {}), proma: promaPeriods.today };
     }
+    // Merged beside the other parse-local adapters rather than after the anchor
+    // snapshot, and with its own `today` partition recorded. Both halves matter:
+    // a targeted watch tick rebuilds `today` from `todayPartitions` (a client with
+    // no partition there reads as zero, and the session archive then restores its
+    // sessions as unclassified — the input split loses cache hit / cache miss),
+    // while month/allTime's applyPeriodDelta is only an identity when the anchor
+    // describes the same clients the fresh tick does.
+    if (dshPeriods && !anchorUsed) {
+      today = mergePeriods(today, dshPeriods.today);
+      month = mergePeriods(month, dshPeriods.month);
+      allTime = mergePeriods(allTime, dshPeriods.allTime);
+      todayPartitions = { ...(todayPartitions || {}), dsh: dshPeriods.today };
+    }
     if (qoderCnPeriods && !anchorUsed) {
       today = mergePeriods(today, qoderCnPeriods.today);
       month = mergePeriods(month, qoderCnPeriods.month);
@@ -1571,6 +1639,7 @@ async function collectUsageOnce(options) {
         commandTimeoutMs,
         signal: options.signal,
         runTokscale: runTokscaleFn,
+        collectDshPeriods: ({ sessionsRoot, now, allTimeSince: since }) => readDshPeriods({ sessionsRoot, now, allTimeSince: since }).then((read) => read.periods),
         resolvePromaPricing: (rows) => resolvePromaPricing(rows, {
           lookupModelPricing: options.lookupModelPricing,
           commandTimeoutMs: options.pricingTimeoutMs ?? Math.min(commandTimeoutMs || PROMA_PRICING_LOOKUP_TIMEOUT_MS, PROMA_PRICING_LOOKUP_TIMEOUT_MS),
@@ -1592,6 +1661,7 @@ async function collectUsageOnce(options) {
         commandTimeoutMs,
         signal: options.signal,
         runTokscale: runTokscaleFn,
+        collectDshPeriods: ({ sessionsRoot, now, allTimeSince: since }) => readDshPeriods({ sessionsRoot, now, allTimeSince: since }).then((read) => read.periods),
         resolvePromaPricing: (rows) => resolvePromaPricing(rows, {
           lookupModelPricing: options.lookupModelPricing,
           commandTimeoutMs: options.pricingTimeoutMs ?? Math.min(commandTimeoutMs || PROMA_PRICING_LOOKUP_TIMEOUT_MS, PROMA_PRICING_LOOKUP_TIMEOUT_MS),
@@ -1747,10 +1817,21 @@ async function collectUsageOnce(options) {
     const historyQoderCnGraph = qoderCnHistoryReadFailed
       ? options.qoderCnHistoryFallbackGraph
       : qoderCnGraph;
+    // A tick that skipped the period read (a targeted watch tick) still resolves
+    // these rows — and their prices — here, rather than publishing an unpriced day.
+    let dshHistoryGraph = null;
+    if (includesDsh) {
+      const reused = dshRows && Object.keys(dshPricingByModel).length > 0;
+      const { rows, pricingByModel } = reused
+        ? { rows: dshRows, pricingByModel: dshPricingByModel }
+        : await readDshRowsAndPricing({ homeDir: options.homeDir });
+      dshHistoryGraph = dshUsage.buildDshHistoryGraph({ rows, pricingByModel });
+    }
     throwIfAborted(options.signal);
     const history = await collectHistoryOnce({
       clients: tokscaleClients,
       promaGraph: includesProma ? buildPromaHistoryGraph({ rows: promaRows || collectPromaRows(), pricingByModel: promaPricing || {} }) : null,
+      dshGraph: dshHistoryGraph,
       qoderCnGraph: historyQoderCnGraph || null,
       historyEnabled: options.historyEnabled,
       commandTimeoutMs: options.historyTimeoutMs,

@@ -97,6 +97,15 @@ One caveat on top of the table:
 
 - Self-synced clients (cursor/antigravity) additionally go in `SELF_SYNCED_CLIENTS`; parse-local clients must NOT.
 - Targeted watch ticks make the client id a correctness surface, because the scan is keyed on it from two independent directions: `clientWatchCandidates()` decides which id a changed path maps to, and `normalizeClientName()` decides which id tokscale's rows land under. Three invariants keep them aligned — the id must be a fixed point of `normalizeClientName()` (so the partition a targeted scan writes is the one it cleared); every tokscale alias in `TOKSCALE_CLIENT_ALIASES` must normalize back to its parent id and be expanded by `tokscaleClientFilter()` (so targeting the parent still scans the alias, as with `antigravity` / `antigravity-cli`); and the filter must never emit `synthetic`. The first two are correctness: break either and a watch tick zeroes a client's partition, feeding a negative delta into month/allTime until the next full scan. The third is performance — `synthetic` makes tokscale enable *every* client, so the targeted scan silently degrades into a full one with correct numbers and none of the saving. Don't diagnose one as the other. `tests/shared/clientPartitionInvariants.test.js` enforces all three.
+- A parse-local client also has to record its own `today` partition. The targeted-tick
+  rebuild takes `today` from `todayPartitions`, so merging periods without registering
+  a partition leaves an empty placeholder behind: a watch tick aimed at another client
+  then reads that client as zero everywhere, and the session archive restores its
+  sessions as unclassified (input no longer splits into cache hit / cache miss). Merge
+  before the anchor snapshot and set both `freshPartitions[client]` (targeted branch)
+  and `todayPartitions[client]` (full-tick branch), the way `proma`/`qodercn` do.
+  `tests/shared/collectorDshPartitions.test.js` pins this for dsh.
+
 - Limits providers have their own catalog and their own checklist — see below. The two are separate: a tracked client is something tokscale counts tokens for, a limits provider is an account whose quota we read, and only some ids are both.
 
 ### Adding a limits provider

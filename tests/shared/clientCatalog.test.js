@@ -63,9 +63,12 @@ test('derived DEFAULT_CLIENTS keeps the existing default-tracked CSV', () => {
   );
 });
 
+// dsh is in this list: a v3 harness writes session.v3.jsonl.zstd, which the
+// pinned tokscale build's dsh reader does not match, so the aggregate is read
+// natively and tokscale is never asked for `dsh`.
 test('derived PARSE_LOCAL_CLIENTS still lists exactly the local adapters', () => {
-  assert.deepEqual([...PARSE_LOCAL_CLIENTS], ['proma', 'qodercn']);
-  assert.deepEqual([...LOCALLY_PARSED_CLIENT_IDS], ['proma', 'qodercn']);
+  assert.deepEqual([...PARSE_LOCAL_CLIENTS], ['proma', 'qodercn', 'dsh']);
+  assert.deepEqual([...LOCALLY_PARSED_CLIENT_IDS], ['proma', 'qodercn', 'dsh']);
 });
 
 test('default-tracked clients are a subset of the catalog, in catalog order', () => {

@@ -198,6 +198,9 @@ test('usage replacement waits for an aborted tokscale child to close before spaw
   }
 });
 
+// dsh is parse-local in the fork (see providers/dsh/usage.js), so it can no
+// longer stand in for an id the binary rejects: `unsloth` does, and the shared
+// capability-probe barrier under test is unchanged.
 test('usage replacement abandons its wait for a shared capability probe without cancelling the probe', async () => {
   const childProcess = require('node:child_process');
   const collectorPath = require.resolve('../../src/shared/collector');
@@ -232,8 +235,8 @@ test('usage replacement abandons its wait for a shared capability probe without 
     }
     const clientIndex = args.indexOf('--client');
     const requested = clientIndex === -1 ? '' : args[clientIndex + 1];
-    if (requested.split(',').includes('dsh')) {
-      return closingChild(2, '', "error: invalid value 'dsh' for --client");
+    if (requested.split(',').includes('unsloth')) {
+      return closingChild(2, '', "error: invalid value 'unsloth' for --client");
     }
     return closingChild(0, JSON.stringify({ entries: [] }));
   };
@@ -243,7 +246,7 @@ test('usage replacement abandons its wait for a shared capability probe without 
   try {
     const fresh = require(collectorPath);
     const usageOptions = {
-      clients: 'claude,dsh',
+      clients: 'claude,unsloth',
       allTimeSince: '2024-01-01',
       commandTimeoutMs: 5000,
       deviceId: 'shared-capability-probe-barrier-test',
@@ -277,7 +280,7 @@ test('usage replacement abandons its wait for a shared capability probe without 
 
     const callsBeforeCacheCheck = calls.length;
     await fresh.collectUsageOnce({
-      clients: 'claude,dsh',
+      clients: 'claude,unsloth',
       allTimeSince: '2024-01-01',
       commandTimeoutMs: 5000,
       deviceId: 'shared-capability-probe-cache-test',

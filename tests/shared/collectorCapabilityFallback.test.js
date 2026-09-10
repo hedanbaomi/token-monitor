@@ -93,6 +93,9 @@ test('a binary that supports every requested client never spawns a capability pr
   }
 });
 
+// dsh is parse-local in the fork (see providers/dsh/usage.js), so it can no
+// longer stand in for an id the binary rejects: `unsloth` does, and the
+// probe/retry behaviour under test is unchanged.
 test('an unknown-client rejection probes once, retries, then filters proactively for later scans', async () => {
   const childProcess = require('node:child_process');
   const originalSpawn = childProcess.spawn;
@@ -107,8 +110,8 @@ test('an unknown-client rejection probes once, retries, then filters proactively
     }
     const clientIndex = args.indexOf('--client');
     const requested = args[clientIndex + 1];
-    if (requested.split(',').includes('dsh')) {
-      return exitChild(2, 'error: invalid value \'dsh\' for --client');
+    if (requested.split(',').includes('unsloth')) {
+      return exitChild(2, 'error: invalid value \'unsloth\' for --client');
     }
     return jsonChild({ entries: [] });
   };
@@ -116,7 +119,7 @@ test('an unknown-client rejection probes once, retries, then filters proactively
   try {
     const { collectUsageOnce } = freshCollector();
     await collectUsageOnce({
-      clients: 'claude,dsh',
+      clients: 'claude,unsloth',
       allTimeSince: '2024-01-01',
       commandTimeoutMs: 1000,
       deviceId: 'test-device',
@@ -130,7 +133,7 @@ test('an unknown-client rejection probes once, retries, then filters proactively
     const clientArgsList = calls
       .filter((args) => !args.includes('--help'))
       .map((args) => args[args.indexOf('--client') + 1]);
-    assert.equal(clientArgsList.filter((csv) => csv.includes('dsh')).length, 1, 'only the first scan ever asks for the unsupported id');
+    assert.equal(clientArgsList.filter((csv) => csv.includes('unsloth')).length, 1, 'only the first scan ever asks for the unsupported id');
     // The first scan's own retry plus the two later scans (filtered proactively
     // once the identity's capability set is known) — three filtered spawns.
     assert.equal(clientArgsList.filter((csv) => csv === 'claude').length, 3);
@@ -179,14 +182,14 @@ test('a probe that itself fails surfaces the original tokscale error, not a sile
 
   childProcess.spawn = (_bin, args) => {
     if (args.includes('--help')) return jsonChild({ not: 'a help payload' });
-    return exitChild(2, 'error: invalid value \'dsh\' for --client');
+    return exitChild(2, 'error: invalid value \'unsloth\' for --client');
   };
 
   try {
     const { collectUsageOnce } = freshCollector();
     await assert.rejects(
       collectUsageOnce({
-        clients: 'claude,dsh',
+        clients: 'claude,unsloth',
         allTimeSince: '2024-01-01',
         commandTimeoutMs: 1000,
         deviceId: 'test-device',

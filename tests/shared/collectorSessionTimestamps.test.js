@@ -342,31 +342,43 @@ test('applySessionTimestamps does not re-walk the DSH tree for already-known ses
 // fresh every time, which would have made that caching a no-op in production
 // regardless of how correct the logic above is. This drives two real
 // collectUsageOnce() calls, the way startCollector's tick loop does, with
-// nothing shared between them except process-wide module state, and asserts
-// the DSH sessions tree is only ever walked on the first one.
-test('collectUsageOnce does not re-walk the DSH sessions tree on a second real tick', async () => {
+// nothing shared between them except the deps object the collector is handed,
+// and asserts the session is still resolved from its transcript header on both
+// while the metadata index itself is only ever built once.
+//
+// The assertion used to be a raw count of fs.readdirSync calls under the
+// sessions root. That stopped measuring this once dsh became parse-local
+// (providers/dsh/usage.js): the usage adapter has to list the tree on every
+// tick to notice a session the harness just started, so the metadata index is
+// counted at its own seam instead. The walk it saves is unchanged.
+test('collectUsageOnce resolves DSH session metadata once, not once per tick', async () => {
   const { collectUsageOnce } = freshCollector();
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-dsh-e2e-'));
-  const sessionsRoot = path.join(home, '.dsh', 'sessions');
-  const realReaddirSync = fs.readdirSync;
   try {
-    const dir = path.join(sessionsRoot, 'proj', 'session-e2e');
+    const dir = path.join(home, '.dsh', 'sessions', 'proj', 'session-e2e');
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'session.jsonl'), `${JSON.stringify({ type: 'session', id: 'session-e2e', createdAt: 1750000000000 })}\n`);
+    // Relative to now: the session's one call has to land inside the today
+    // window the tick is collecting, and the header's createdAt has to be
+    // earlier than it so the decoration below is the thing under test.
+    const createdAtMs = Date.now() - 2000;
+    const callAtMs = createdAtMs + 1000;
+    fs.writeFileSync(path.join(dir, 'session.jsonl'), `${[
+      JSON.stringify({ type: 'session', id: 'session-e2e', createdAt: createdAtMs }),
+      // One billable call, so the native read yields the session row the
+      // decoration below has to refine: the call happened well after the
+      // session was created, and the header's createdAt must still win.
+      JSON.stringify({
+        type: 'assistant/message',
+        seq: 1,
+        time: callAtMs,
+        data: {
+          usage: { inputTokens: 10, outputTokens: 5 },
+          message: { source: { provider: 'opencode-go', model: 'deepseek-v4-flash' } }
+        }
+      })
+    ].join('\n')}\n`);
 
-    // dshSessionFiles() walks the tree via fs.readdirSync(dir, {withFileTypes}).
-    // Counting only calls rooted under the DSH sessions dir isolates "the
-    // tree was walked" from every other readdirSync call a full tick makes
-    // (tokscale client discovery, WSL probing, etc).
-    let walks = 0;
-    fs.readdirSync = (target, ...rest) => {
-      if (typeof target === 'string' && target.startsWith(sessionsRoot)) walks += 1;
-      return realReaddirSync(target, ...rest);
-    };
-
-    const stubTokscale = async () => ({
-      entries: [{ client: 'dsh', sessionId: 'session-e2e', model: 'deepseek-v4-flash', input: 10, output: 5, cost: 0.001 }]
-    });
+    let indexBuilds = 0;
     const baseOptions = {
       clients: 'dsh',
       allTimeSince: '2024-01-01',
@@ -376,20 +388,24 @@ test('collectUsageOnce does not re-walk the DSH sessions tree on a second real t
       limitsEnabled: false,
       historyEnabled: false,
       homeDir: home,
-      runTokscale: stubTokscale,
+      // dsh usage no longer comes from tokscale, so there is no runTokscale
+      // stub here: the row is read from the transcript above.
+      sessionMetadataDeps: {
+        dshSessionFileCache: new Map(),
+        indexDshSessionHeaders: (options) => { indexBuilds += 1; return indexDshSessionHeaders(options); }
+      },
       collectWslUsage: async () => ({ bundle: { today: {}, month: {}, allTime: {} }, detected: [] })
     };
 
     const first = await collectUsageOnce(baseOptions);
-    assert.equal(first.today.sessions['dsh:session-e2e'].startedAt, new Date(1750000000000).toISOString());
-    const walksAfterFirstTick = walks;
-    assert.ok(walksAfterFirstTick > 0, 'the first real tick must discover the session via the tree walk');
+    assert.ok(first.today.sessions['dsh:session-e2e'].totalTokens > 0, 'the native read must find the session usage');
+    assert.equal(first.today.sessions['dsh:session-e2e'].startedAt, new Date(createdAtMs).toISOString());
+    assert.equal(indexBuilds, 1, 'the first real tick resolves the unknown id via one metadata walk');
 
     const second = await collectUsageOnce(baseOptions);
-    assert.equal(second.today.sessions['dsh:session-e2e'].startedAt, new Date(1750000000000).toISOString());
-    assert.equal(walks, walksAfterFirstTick, 'a second collectUsageOnce() call must not rebuild and re-walk the DSH tree');
+    assert.equal(second.today.sessions['dsh:session-e2e'].startedAt, new Date(createdAtMs).toISOString());
+    assert.equal(indexBuilds, 1, 'a second collectUsageOnce() call must not re-walk the DSH tree for metadata');
   } finally {
-    fs.readdirSync = realReaddirSync;
     delete require.cache[collectorPath];
     fs.rmSync(home, { recursive: true, force: true });
   }
