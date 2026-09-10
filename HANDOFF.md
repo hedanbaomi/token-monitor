@@ -45,7 +45,6 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - 格式与 Claude Code 完全一致（`input_tokens`/`output_tokens`/`cache_creation_input_tokens`/`cache_read_input_tokens`）
 - **Cowork 的 token 归到 `claude` 客户端**（不单独显示 cowork 行），这样 Claude Code + Cowork 合并成一个 claude 工具行 + 一个 claude-opus 模型行
 
-
 ### DSH（DeepSeek Harness）
 
 harness 每个 session 一份 transcript：
@@ -412,7 +411,6 @@ harness 每个 session 一份 transcript：
   - `git diff --check`：Clean；
   - 真实采集：`npm run agent:once -- --dry-run` 采集正常。
 
-
 ### 2026-09-10 rebase：v0.54.0 → v0.55.0 ⚠️ 手工合并 4 处冲突
 - `git fetch origin` 后 `origin/main` 从 `52bed5f`(v0.54.0) 前进 21 个提交到 `f8adfd7`(v0.55.0)。`git rebase origin/main` 在 4 个提交上冲突，解决后 41 个本地提交重放；第 42 个 `d38edc5 chore: sync worker shared and update hub build registry for v0.54.0` 在冲突解决后**已无内容**（`worker/src/shared` 与 registry 都已是当前状态，重放产物为空）被 git 自动 drop——`npm run sync:worker` 现在确认零漂移，`hubBuild.test.js` 全绿，所以该提交的意图已由后续提交 + 上游自身同步满足（分支回滚点：`backup/pre-v0.55-rebase`）。
 - **冲突 1–3（`src/shared/collector.js` 顶部 require 区）**：上游把各集成搬进 `src/shared/providers/<x>/`（#622/#624/#625）：`limitResetBoundary.js`→`limits/resetBoundary.js`、`antigravitySelfSync`→`providers/antigravity/selfSync.js`、`opencodeSession`→`providers/opencode/session.js`、`reasonixSessionDetail`→`providers/reasonix/sessionDetail.js`。我们早期提交里的旧路径 require 与它们冲突。**解决**：一律采用上游新路径；顺手删掉早已无用的 `const zcodeSession = require('./zcodeSession')`（ZCode 改走 tokscale 后 collector 不再引用它，eslint 会报 unused）。
@@ -442,12 +440,16 @@ harness 每个 session 一份 transcript：
   - 新增 `tests/shared/dshUsage.test.js`（8 例）+ v3 文件名/详情/ WSL 用例，全部通过。
 - **注意**：`deepseek/deepseek-v4.1-flash` 带供应商前缀，目录价能查到但未必等于实付；想按实付口径算，可在 widget「自定义单价」里加 `deepseek/deepseek-v4.1-flash`（fork 的 `withCustomModelPricing()` 会优先用自定义单价）。
 
-
-- **上游 PR（2026-09-10）**：确认这是**工具自身**的缺陷（不是我们的本地改动导致）——上游 main 的 `providers/dsh/sessionFiles.js` 仍只匹配未版本化文件名，且其 pinned tokscale 4.15.1 的 dsh reader 同样只认旧名；仓库里没有等价的修复（相关 PR #408/#419/#410/#412/#409/#427/#448 都已并入且都不是这件事；open issue #497 讲的是 DSH Desktop 的另一个目录，不是改名）。因此已向上游提 PR：**[#657 fix(dsh): count usage written by a v3 harness](https://github.com/Javis603/token-monitor/pull/657)**。
-  - 分支 `fix/dsh-v3-transcripts`（本地保留，工作树已删除；需要改 PR 时用 `git worktree add <dir> fix/dsh-v3-transcripts` 重新拉出来），推送到 fork `hedanbaomi/token-monitor`（本仓库已加 remote `fork`，改完 `git push fork fix/dsh-v3-transcripts` 即可更新 PR）。
-  - PR 只含 DSH 相关内容：新增 `providers/dsh/usage.js`、`sessionFiles.js` 版本段匹配、`sessionDetail.js` 共享解析、`clientCatalog` 标 `locallyParsed`、collector 读取/合并/**分区登记**/graph、WSL 分支、`docs/providers/dsh.md`、AGENTS.md 的分区不变式，以及 4 个测试文件。不含 zcode/cowork 等 fork 特性。
-  - **本仓库的 `feature/zcode-cowork-support` 仍未 push**（只有 PR 分支被推到了我们自己的 fork）。
-  - 提交前在上游基线上跑过完整测试：4228 tests / 4215 pass / **5 fail**，与干净 `origin/main` 在本机的失败集合逐字相同（3×`clientDataDirPresence` + 打包 Widget 符号链接 + Hermes watch 根），即零回归。
+- **上游 PR（2026-09-10）**：确认这是**工具自身**的缺陷（不是我们的本地改动导致）——上游 main 的 `providers/dsh/sessionFiles.js` 仍只匹配未版本化文件名，且其 pinned tokscale 4.15.1 的 dsh reader 同样只认旧名；仓库里没有等价的修复（相关 PR #408/#419/#410/#412/#409/#427/#448 都已并入且都不是这件事；open issue #497 讲的是 DSH Desktop 的另一个目录，不是改名）。已提 PR，并按维护者要求**拆成两半**：
+  - **[#657 fix(dsh): discover versioned session transcripts](https://github.com/Javis603/token-monitor/pull/657)**（**当前唯一的上游 PR**，只含会话详情 + 版本化文件发现 + 测试 + `docs/providers/dsh.md`）：`sessionFiles.js` 匹配 `session.vN.*` 并在同一 session 目录内**把版本化文件排在前面**、`indexDshSessionHeaders` 改为首个命中优先；`sessionDetail.js` 把逐行解析抽成一个函数（行为不变，`parseDshDetailEvents` 仍是它的投影）。
+  - **用量迁移那一半没有提 PR**：维护者倾向不把 DSH 改成 parse-local（不愿在 widget 里重复 tokscale 的解析/定价/去重/历史/WSL），并打算在 tokscale 侧修文件名。GitHub 也不允许以「只存在于 fork 的分支」作为 base（无法堆叠跨仓 PR），所以在 fork 里保留分支 **`feat/dsh-native-usage`**（`hedanbaomi/token-monitor`，基于 `fix/dsh-v3-transcripts`，已推送；本地同名分支也在），需要时一条命令即可提 PR 或直接丢弃。分支内容 = 本仓库现有 DSH 原生读取的全套（usage.js / clientCatalog / collector / wslUsage / 分区 / 测试 / 文档）。
+- **给维护者的 tokscale 侧证据**（已作为 #657 的评论贴出，实证来自本机）：
+  1. 把 v3 transcript 复制成旧名放进临时 `DSH_HOME`，tokscale 复现出**完全一致**的计数（1,047,701 input / 179,435 output / 485 messages）→ 缺的就是文件名；
+  2. 同一批记录同时以两个 tokscale 已认的名字暴露时，它仍只报 **485**（不是 970）；把 2 条记录的残缺副本和完整 transcript 并排放，两个方向都报 **485** → tokscale 会**并集 + 按记录签名去重**，所以加版本化文件名不会双计，也不怕读到旧副本；
+  3. 附带发现：tokscale 的 DSH 根目录走 **`DSH_HOME` 环境变量**，`--home <dir>` 不能重定向它 → 上游按 home 的 WSL 扫描实际一直在读宿主机的 `~/.dsh`。
+- **本仓库（fork）当前状态**：`feature/zcode-cowork-support` **仍未 push**，且**保留完整的 DSH 原生读取**（这是本机 DSH 用量今天能正常统计的唯一原因）。只把 PR 分支推到了我们自己的 fork；本仓库的 remote 里多了 `fork`（= `hedanbaomi/token-monitor`）。
+- **日后迁回 tokscale 路径的做法**（等官方发布或维护者的 fork 构建可用时）：DSH 原生读取的全部价值就是「旧版本 tokscale 认不出 v3 文件名」，所以迁移应当**一次删干净**：删 `providers/dsh/usage.js` + `dshUsage` 相关接线（collector 的 `readDshPeriods`/`dshPeriods`/`dshGraph`/分区登记、`wslUsage` 的 `collectDshPeriods`）+ 把 `clientCatalog` 的 `dsh.locallyParsed` 去掉 + 删对应测试。**注意**：`locallyParsed: true` 是「tokscale 不要扫 dsh」的开关，如果**只**去掉它却留着原生合并，DSH 会被算两遍。tokscale 侧的落地方式这个仓库已经现成：`scripts/vendor/tokscale.json` 的 `mode: override` + `Javis603/tokscale` fork 的 release（每个平台 sha256 校验），正是为「上游发版慢」准备的，切 `override` 比新增基础设施简单。
+- **留意的 rebase 冲突点**：`providers/dsh/sessionDetail.js` —— 上游 #657 会带来同一份 `dshTranscriptRecords` 抽取，但**不导出**它（上游没有消费者）；我们的 fork 多一行 `dshTranscriptRecords,` 导出给 `usage.js` 用。下次 rebase 到这个文件时按「保留我们的导出行、其余用上游」解决即可。
 ### Windows 下谷歌反重力（Antigravity）用量显示 0 token / 旧缓存卡死 ✅ 已修复（2026-08-23）
 - **现象**：在 Windows 环境下，反重力（Antigravity）token 统计显示为 0 token 或长期停留在旧数据，状态异常。
 - **根因**：Windows 下 tokscale antigravity sync 无法从 DesktopAgent RPC 同步当前会话，导致缓存停留在旧数据；这是上游仍在跟踪的 Windows 问题：[tokscale #1129](https://github.com/junhoyeo/tokscale/issues/1129)。
@@ -485,7 +487,6 @@ node -e "const z=require('./src/shared/zcodeSession'); const p=z.collectZcodeUsa
 :: 启动
 npm run dev   :: 或双击 launch-background.vbs
 ```
-
 
 :: DSH 专项测试（适配器 / 文件名 / 会话详情 / WSL）
 node --test tests/shared/dshUsage.test.js tests/shared/dshSessionFiles.test.js tests/shared/dshSessionDetail.test.js tests/shared/wslUsage.test.js
