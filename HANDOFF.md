@@ -1,14 +1,15 @@
-# 交接文档 — ZCode + Cowork 监测集成
+# 交接文档 — ZCode + Cowork + DSH（DeepSeek Harness）监测集成
 
 > 本文档记录了在 token-monitor（github.com/Javis603/token-monitor）基础上所做的全部修改，供后续 agent 接手。
-> 基线版本：上游 main（v0.27.0+）。所有改动在本地分支 `feature/zcode-cowork-support`，**未 push**。
+> 基线版本：上游 main（v0.27.0+，当前已 rebase 到 **v0.55.0**）。所有改动在本地分支 `feature/zcode-cowork-support`，**未 push**。
 
 ## 一、总体目标
 
-为 token-monitor 增加 **Claude Cowork** 的 token 监测，并让 **ZCode** 走上游 tokscale 路径。
+为 token-monitor 增加 **Claude Cowork** 与 **DeepSeek Harness（DSH）** 的 token 监测（两者 tokscale 都读不到，原生读取），并让 **ZCode** 走上游 tokscale 路径。
 
 - **ZCode**：上游 tokscale 已能扫描 `~/.zcode/cli/db/db.sqlite`。周期用量与历史 graph 都走 tokscale，不再原生 merge（避免与上游双计）。会话详情仍读本地 SQLite（tokscale 没有 ZCode transcript 路径）。
 - **Cowork**：上游仍扫不到 Claude Desktop 沙盒，继续原生读取，用量归到 `claude`。
+- **DSH（DeepSeek Harness）**：tokscale 4.15.x（当时最新）的 dsh 读取器只匹配未版本化的 `session.jsonl(.zstd)`，而 v3 之后的 harness 改写 `session.v3.jsonl.zstd`（旧文件保留、不再追加），于是**升级后写得的所有会话在 tokscale 眼里根本不存在**（周期用量/历史图/会话详情全丢）。fork 改为**原生读取** `~/.dsh/sessions/**`，并把 `dsh` 从 tokscale 客户端列表剔除（`clientCatalog.js` 标 `locallyParsed: true`）。
 
 ## 二、ZCode 的本地数据位置（关键）
 
@@ -32,7 +33,7 @@ ZCode 把 token 数据存在 CLI 运行时数据库里，**不是** `~/.zcode/pr
 - `tool_usage`：每轮用到的工具名（会话详情用）
 - `session`：`directory` 列 = 工作区路径（**项目归因**用）
 
-## 三、Cowork 的本地数据位置
+## 三、Cowork 与 DSH 的本地数据位置
 
 Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Claude Code，写标准 Claude Code JSONL：
 ```
@@ -44,6 +45,25 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 - 格式与 Claude Code 完全一致（`input_tokens`/`output_tokens`/`cache_creation_input_tokens`/`cache_read_input_tokens`）
 - **Cowork 的 token 归到 `claude` 客户端**（不单独显示 cowork 行），这样 Claude Code + Cowork 合并成一个 claude 工具行 + 一个 claude-opus 模型行
 
+
+### DSH（DeepSeek Harness）
+
+harness 每个 session 一份 transcript：
+
+```
+<DSH_HOME 或 ~/.dsh>/sessions/<encoded-cwd>/<session-id>/session[.<版本>].jsonl[.zstd]
+```
+
+| 文件 | 内容 | 是否采用 |
+|---|---|---|
+| `session.v3.jsonl.zstd` | **v3 harness 改写的新文件**（升级时把旧 transcript 整份重编码进来；旧文件留在原地不再追加） | ✅ 主源 |
+| `session.jsonl.zstd` | v2 及更早写的 transcript（zstd 逐 flush 一帧，可能尾部撕裂） | ✅ |
+| `session.jsonl` | 未压缩变体（测试/降级路径） | ✅ |
+
+- 记录是 `{type, seq, time, data}` 信封：token 在 `data.usage.{inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,reasoningTokens}`，模型/供应商在 `data.message.source.{model,provider}`。
+- **同一个 session 目录可能同时存在 v2 与 v3 两份**（等价重编码），必须按 `(session, time, routing, token 签名)` 去重。
+- `DSH_HOME` 可改根目录（`providers/dsh/paths.js` 按 env 解析，原生读取同样支持）；WSL 侧的 `.dsh/sessions` 经 `\\wsl$\<distro>\...` 读取。
+
 ## 四、修改/新增的文件清单
 
 ### 新增文件
@@ -53,6 +73,8 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 | `src/shared/coworkSession.js` | **Cowork 适配器**：动态发现 MSIX 沙盒路径，读所有 `*.jsonl`，解析 assistant 行的 usage；归到 `claude` 客户端 |
 | `tests/shared/zcodeSession.test.js` | ZCode 单测（周期分桶/成本/项目归因/会话详情/JSONL 兜底） |
 | `tests/shared/coworkSession.test.js` | Cowork 单测（归到 claude/模型合并/成本） |
+| `src/shared/providers/dsh/usage.js` | **DSH 适配器**：原生读 `~/.dsh/sessions/**`（含 `session.v3.jsonl.zstd`），复用 `sessionFiles.js` 的 zstd 解码与 `sessionDetail.js` 的记录语义，输出 tokscale 形状 JSON 供 `extractUsageFromTokscale` 合入；含按 (size, mtimeMs) 的解析缓存与 `buildDshHistoryGraph` |
+| `tests/shared/dshUsage.test.js` | DSH 适配器单测（双编码去重 / 本地午夜分桶 / 定价 / reasoning 拆分 / 历史图 / 缓存失效） |
 | `launch-background.vbs` | Windows 后台静默启动脚本（无 cmd 黑窗） |
 | `install-autostart.bat` / `uninstall-autostart.bat` | 开机自启安装/卸载 |
 | `assets/icons/zcode.svg` / `site/assets/icons/zcode.svg` | ZCode 图标（复用 zai.svg） |
@@ -68,6 +90,13 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 | `src/electron/renderer/app.js` | `KNOWN_CLIENTS`/`clientLabels`/`clientsWithIcon` 加 zcode；**会话点击白名单**加 `'zcode'`（否则点不开） |
 | `src/electron/main.js` | 两处 `startCollector` 加 `customModelPricing: () => settings.customModelPricing \|\| []`（函数式 getter，改单价立即生效） |
 | `package.json` | `check` 脚本注册新文件 |
+| `src/shared/providers/dsh/sessionFiles.js` | 文件名匹配扩展到可选版本段（`session[.vN].jsonl[.zstd]`）；同一 session 目录内**按版本优先列出活的 transcript**；`indexDshSessionHeaders` 改为首次命中优先 |
+| `src/shared/providers/dsh/sessionDetail.js` | 抽出共享解析 `dshTranscriptRecords()`（prompt/usage 记录 + fork seed 前缀 + 重放去重 + tokens），`parseDshDetailEvents()` 变成它的投影；usage.js 与会话详情共用同一语义 |
+| `src/shared/clientCatalog.js` | `dsh` 标 `locallyParsed: true` → `PARSE_LOCAL_CLIENTS` = proma/qodercn/dsh，tokscale 扫描与 graph 都不再请求 `dsh` |
+| `src/shared/wslUsage.js` | 新增 DSH 分支：WSL home 的 `.dsh/sessions` 经 `\\wsl$\` UNC 原生读取（与 proma 分支同构）——否则 parse-local 会让 WSL 的 DSH 用量整块消失 |
+| `src/shared/collector.js` | 新增 `readDshPeriods()`（宿主/WSL 共用）与 `withCustomModelPricing()`；`dshPeriods` 在 **anchor 快照之后**合入 today/month/allTime；`dshGraph` 进 rawGraphs/histories；`collectWsl` 传 `collectDshPeriods`；`canContinueWithNativeSource` 加 dsh |
+| `tests/shared/dshSessionFiles.test.js`、`tests/shared/dshSessionDetail.test.js`、`tests/shared/wslUsage.test.js` | v3 文件名与优先顺序、header 索引、会话详情打开 v3 session、WSL DSH 分支与"无数据不读" |
+| `tests/shared/clientCatalog.test.js`、`tests/shared/collectorSessionTimestamps.test.js`、`tests/shared/collectorCapabilityFallback.test.js`、`tests/shared/collectorCancellation.test.js` | 上游测试按 fork 语义调整：PARSE_LOCAL_CLIENTS 含 dsh；dsh 不再走 tokscale，元数据缓存改为在 index 缝计数；capability probe 用例里"未知 client id"的角色由 dsh 换成 unsloth |
 
 ## 五、关键设计决策与坑
 
@@ -77,6 +106,14 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 4. **tokscale try/catch**：tokscale 卡住/失败时（尤其 watch tick 的 `--today`），不能让整个 tick reject 抹掉原生数据，否则仪表盘闪烁 active↔waiting。
 5. **会话点击白名单**：`app.js` 的 `els.breakdown.addEventListener('click')` 有硬编码客户端列表，必须同时保留上游的 `'dsh'`/`'reasonix'` 和我们的 `'zcode'` 才能点开会话详情。
 6. **项目归因**：ZCode 会话需要 `projectId`/`projectLabel` 才能进「项目」视图；从 `session.directory` 用 `hashKey`+`normalizeProjectPath` 算（复刻 collector.js 的 `projectIdentity`，避免循环依赖）。
+
+7. **DSH 原生读取（v3 文件名）**：根因只是文件名——把 `session.v3.jsonl.zstd` 改名成旧名后 tokscale 能 100% 正确解析（内容信封完全兼容）。我们**不做临时镜像/junction 去骗 tokscale**：那样既要在用户数据目录旁写东西，又要判断"同一会话两份文件哪个算数"，而原生读取把这些都收进自己的去重逻辑里。
+8. **同一会话两份编码必须去重**：v3 升级会把旧 transcript **整份重编码**成新文件并保留旧文件。实测两份文件的 usage 事件集合**完全相同**（时间/模型/供应商/token 逐条一致），按 `(session, time, routing, token 签名)` 去重；不去重就是**翻倍**。
+9. **记录语义必须与 tokscale 对齐**：fork 会话的 seed 前缀（`seq < session.seedLength` 不计）、重放行去重、`output` 与 `reasoning` 的拆分口径（`dsh` 属于 tokscale 的 disjoint-reasoning 客户端：entry 里 `output = 原始 output − reasoning`，由共用 token 数学加回去）全部复用 `sessionDetail.js`——它的注释逐条对应 tokscale 的 `dsh.rs`。
+10. **DSH 必须在 anchor 快照之后合入**：`collectUsageOnce` 里的 `windowsPeriods`（约 1677 行）是下一次 watch tick 的 anchor。dsh 若在它之前合入，anchor 就带上 dsh，下一次 `applyPeriodDelta(anchor.month, today, anchor.today)` 会把 dsh 的 month 重复叠加（实测会明显偏大）。所以 dsh 的 merge 放在快照之后（与 cowork 同构），并在读完时**单独** `decorateLocalPeriods(dshPeriods)` 用 transcript header 的 `createdAt` + 文件 mtime 回填 startedAt/lastUsedAt（复用上游 dsh 元数据缓存，不额外重走树）。
+11. **解析缓存**：DSH transcript 是 zstd 帧，只能整份解压；watch tick 几秒一次，全量重解本机 30 个文件 ≈ 0.9s（明显 CPU 抖动）。`usage.js` 按 `(size, mtimeMs)` 缓存解析结果：冷 887ms → 热 15ms，文件被追加（size 变化）立即失效，文件消失则从缓存剔除。
+12. **WSL**：`dsh` 变 parse-local 后不会再进 WSL 的 tokscale CSV，因此 WSL home 的 `.dsh/sessions` 必须原生读（与 proma 的 WSL 分支同构），否则只有宿主机的 DSH 有数据、发行版里的整块消失。
+13. **成本口径**：DSH transcript 不带 cost。定价走 `resolveModelPricing`（tokscale `pricing` 命令 → `custom-pricing.json`，离线回退到本地 catalog 缓存，6h 缓存），再用 `withCustomModelPricing()` 让 widget 里的自定义单价（每百万）覆盖目录价。实测与 tokscale 对同一批会话算出的美元**误差 0**。
 
 ## 六、更新维护流程（rebase）
 
@@ -375,7 +412,36 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
   - `git diff --check`：Clean；
   - 真实采集：`npm run agent:once -- --dry-run` 采集正常。
 
+
+### 2026-09-10 rebase：v0.54.0 → v0.55.0 ⚠️ 手工合并 4 处冲突
+- `git fetch origin` 后 `origin/main` 从 `52bed5f`(v0.54.0) 前进 21 个提交到 `f8adfd7`(v0.55.0)。`git rebase origin/main` 在 4 个提交上冲突，解决后 41 个本地提交重放；第 42 个 `d38edc5 chore: sync worker shared and update hub build registry for v0.54.0` 在冲突解决后**已无内容**（`worker/src/shared` 与 registry 都已是当前状态，重放产物为空）被 git 自动 drop——`npm run sync:worker` 现在确认零漂移，`hubBuild.test.js` 全绿，所以该提交的意图已由后续提交 + 上游自身同步满足（分支回滚点：`backup/pre-v0.55-rebase`）。
+- **冲突 1–3（`src/shared/collector.js` 顶部 require 区）**：上游把各集成搬进 `src/shared/providers/<x>/`（#622/#624/#625）：`limitResetBoundary.js`→`limits/resetBoundary.js`、`antigravitySelfSync`→`providers/antigravity/selfSync.js`、`opencodeSession`→`providers/opencode/session.js`、`reasonixSessionDetail`→`providers/reasonix/sessionDetail.js`。我们早期提交里的旧路径 require 与它们冲突。**解决**：一律采用上游新路径；顺手删掉早已无用的 `const zcodeSession = require('./zcodeSession')`（ZCode 改走 tokscale 后 collector 不再引用它，eslint 会报 unused）。
+- **冲突 4（`5114635` antigravity Windows 本地 SQLite 兜底，collector.js 大块）**：上游把 `maybeSyncCursor`/`maybeSyncAntigravity` 搬成 `providers/{cursor,antigravity}/selfSync.js` 的工厂（`createCursorSelfSync`/`createAntigravitySelfSync`），而该提交当时在 collector.js 内联实现并改过 antigravity 段。**解决**：采用上游工厂解构，只保留我们**新增**的 8 个本地兜底函数（`antigravityLocalConversationRoots`/`removeAntigravityLocalScanHome`/`scanAntigravityConversationRoot`/`collectWindowsAntigravityLocalUsage`/`antigravityRowsBySession`/`mergeAntigravityLocalRows` 等，约 138 行），丢掉我们那份过期的 `antigravityDataRoots`/`antigravityDataPresent`/`antigravitySyncLockPath`/`removeOwnedAntigravitySyncLock`/`repairAntigravitySyncLock` 拷贝（上游已在 selfSync.js 提供并从那里导出，main.js 也改为引它）。调用侧（`scanUsageBundle` 的 `mergeAntigravityLocalRows`）本就在冲突块外，无需改动。
+- **冲突 5–6（`8902d77`/`d38edc5` 的 `src/shared/hubBuildRegistry.json` 与 `worker/` 副本）**：这是**生成文件**。**解决**：取上游版本（`git checkout --ours`）后跑 `node scripts/update-hub-build.js` + `npm run sync:worker` 重新生成；`tests/shared/hubBuild.test.js` 13/13 通过。注意 `npm run sync:worker` 会让 `worker/src/shared/currency.js` 出现 CRLF-only 差异，`git checkout --` 即可（git 提交时会按 .gitattributes 归一）。
+- **上游 v0.55 其它值得注意的改动**：①`providers/<x>/` 目录化重构（集成各归其位，我们新增的 `providers/dsh/*` 天然融入）；②限额重置动画（#644/#651）与"过期 vs 重置"区分（#652）；③Kilo CLI + Kilo Code 合并（#635）；④本地 ZCode 登录发现喂给 GLM 限额行（#630）；⑤Codex app-server 兜底改 never approval（#631）；⑥`runtimeConfig.js` 继续持有我们的 `customModelPricing` 函数式 getter（`usageConfigFromSettings`）。
+- **验证**：完整 `npm test` = **4268 tests / 4255 pass / 5 fail**（DSH 修复 + 新增测试后）；这 5 个失败与**未含本次改动的干净 checkout（临时 worktree `a0da46c`）逐字相同**：`clientDataDirPresence` ×3（本机路径/环境）、`symlinked packaged Widget artifacts`（Windows 符号链接权限）、`watchIgnoreMatcher prunes the Hermes runtime`（本机 Hermes 数据）。另外：先跑出的 3 个 `collectorCapabilityFallback`/`collectorCancellation` 失败是**真回归**（它们用 `dsh` 当"二进制不认识的 client id"，而 dsh 现在根本不会进 tokscale CSV），已把该用例的角色换成 `unsloth` 并加注释说明；换后 18/18 通过。
+- `git diff --check` clean；`npx eslint` 所有改动文件 0 error；真实采集：`collectUsageOnce({clients:'dsh'})` 返回 today 46.4M / allTime 268M，`history.summary.totalTokens` 与周期合计一致（见第七节 DSH 条目）。
+
 ## 七、已解决问题
+
+### DeepSeek Harness（DSH）用量完全统计不到（当天 deepseek-v4.1-flash 一条都没记） ✅ 已修复（2026-09-10）
+- **现象**：2026-09-10 用 DeepSeek Harness 调 `deepseek/deepseek-v4.1-flash`，仪表的 DSH 一行**完全没有今天的用量**（tokscale `--today`/`--month` 的 dsh 条目为 0 条），所有 DSH 数字都停在 8 月。
+- **根因**：DSH v3 把 transcript 写到**新文件名** `session.v3.jsonl.zstd`，旧名 `session.jsonl(.zstd)` 保留但不再追加：
+  1. tokscale 4.15.1（当时最新）的 dsh 读取器只匹配旧名 → **升级后写的会话对 tokscale 完全不存在**；
+  2. 我们自己的 `providers/dsh/sessionFiles.js`（会话详情用）也是固定名字集合 → 这些会话连详情都点不开。
+  3. **实测确认**：把 v3 文件改名成 `session.jsonl.zstd` 再让 tokscale 扫（`DSH_HOME` 指向临时树），tokscale 立刻返回正确的 token/消息数/成本——内容信封完全兼容，问题 100% 在文件名。
+- **修复**：
+  1. `providers/dsh/sessionFiles.js`：文件名匹配扩展为可选版本段（`session[.vN].jsonl[.zstd]`）；同一 session 目录内按版本号优先列出活的 transcript；`indexDshSessionHeaders` 首次命中优先。
+  2. 新增 `providers/dsh/usage.js`：**原生读 DSH**（周期 + 历史图），复用 `sessionFiles.js` 的解码与 `sessionDetail.js` 的记录语义；同一会话的两份编码按 `(session,time,routing,token)` 去重；输出 tokscale 形状 JSON 交给 `extractUsageFromTokscale`。
+  3. `collector.js`：`clientCatalog.js` 给 `dsh` 标 `locallyParsed` → tokscale 扫描/图都不再请求 dsh；原生结果在 anchor 快照之后 merge；新增 `withCustomModelPricing()`；`dshGraph` 并入 rawGraphs/histories。
+  4. `wslUsage.js`：新增 DSH 分支，WSL home 的 `.dsh/sessions` 经 `\\wsl$\` 原生读。
+  5. 时间戳：读完 dsh 周期后单独 `decorateLocalPeriods(dshPeriods)`，用 header `createdAt` + 文件 mtime 回填 startedAt/lastUsedAt。
+- **验证**：
+  - 对 tokscale **仍能看到的 16 个会话**，原生读数 vs tokscale 输出：input/output/cacheRead/messageCount **逐条完全相等**，成本误差 0（例：`session-53a15a2f…` = 1047701 / 179435 / 176406528 / 485 msgs / $2.045758214）。
+  - 修复后真实采集：`collectUsageOnce({clients:'dsh'})` → today **46.4M tokens / 2 sessions / $0.68**（修复前 0），allTime 268M；`history.summary.totalTokens` 与 allTime 周期合计**一致**（历史图也补上了 9-10 这一天）。
+  - 新增 `tests/shared/dshUsage.test.js`（8 例）+ v3 文件名/详情/ WSL 用例，全部通过。
+- **注意**：`deepseek/deepseek-v4.1-flash` 带供应商前缀，目录价能查到但未必等于实付；想按实付口径算，可在 widget「自定义单价」里加 `deepseek/deepseek-v4.1-flash`（fork 的 `withCustomModelPricing()` 会优先用自定义单价）。
+
 
 ### Windows 下谷歌反重力（Antigravity）用量显示 0 token / 旧缓存卡死 ✅ 已修复（2026-08-23）
 - **现象**：在 Windows 环境下，反重力（Antigravity）token 统计显示为 0 token 或长期停留在旧数据，状态异常。
@@ -414,3 +480,11 @@ node -e "const z=require('./src/shared/zcodeSession'); const p=z.collectZcodeUsa
 :: 启动
 npm run dev   :: 或双击 launch-background.vbs
 ```
+
+
+:: DSH 专项测试（适配器 / 文件名 / 会话详情 / WSL）
+node --test tests/shared/dshUsage.test.js tests/shared/dshSessionFiles.test.js tests/shared/dshSessionDetail.test.js tests/shared/wslUsage.test.js
+:: DSH 真实数据（原生读数）
+node -e "const u=require('./src/shared/providers/dsh/usage'); const r=u.collectDshRows({}); console.log(r.length, 'rows');"
+:: DSH 周期（today/month/allTime）
+node -e "const u=require('./src/shared/providers/dsh/usage'); const p=u.buildDshPeriods({allTimeSince:'2025-01-01'}); const t=p.today; console.log('today', t.totalInput+t.totalOutput+t.totalCacheRead+t.totalCacheWrite, t.totalMessages, Object.keys(t.entries?{}:{}).length);"
