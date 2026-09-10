@@ -443,6 +443,11 @@ harness 每个 session 一份 transcript：
 - **注意**：`deepseek/deepseek-v4.1-flash` 带供应商前缀，目录价能查到但未必等于实付；想按实付口径算，可在 widget「自定义单价」里加 `deepseek/deepseek-v4.1-flash`（fork 的 `withCustomModelPricing()` 会优先用自定义单价）。
 
 
+- **上游 PR（2026-09-10）**：确认这是**工具自身**的缺陷（不是我们的本地改动导致）——上游 main 的 `providers/dsh/sessionFiles.js` 仍只匹配未版本化文件名，且其 pinned tokscale 4.15.1 的 dsh reader 同样只认旧名；仓库里没有等价的修复（相关 PR #408/#419/#410/#412/#409/#427/#448 都已并入且都不是这件事；open issue #497 讲的是 DSH Desktop 的另一个目录，不是改名）。因此已向上游提 PR：**[#657 fix(dsh): count usage written by a v3 harness](https://github.com/Javis603/token-monitor/pull/657)**。
+  - 分支 `fix/dsh-v3-transcripts`（本地保留，工作树已删除；需要改 PR 时用 `git worktree add <dir> fix/dsh-v3-transcripts` 重新拉出来），推送到 fork `hedanbaomi/token-monitor`（本仓库已加 remote `fork`，改完 `git push fork fix/dsh-v3-transcripts` 即可更新 PR）。
+  - PR 只含 DSH 相关内容：新增 `providers/dsh/usage.js`、`sessionFiles.js` 版本段匹配、`sessionDetail.js` 共享解析、`clientCatalog` 标 `locallyParsed`、collector 读取/合并/**分区登记**/graph、WSL 分支、`docs/providers/dsh.md`、AGENTS.md 的分区不变式，以及 4 个测试文件。不含 zcode/cowork 等 fork 特性。
+  - **本仓库的 `feature/zcode-cowork-support` 仍未 push**（只有 PR 分支被推到了我们自己的 fork）。
+  - 提交前在上游基线上跑过完整测试：4228 tests / 4215 pass / **5 fail**，与干净 `origin/main` 在本机的失败集合逐字相同（3×`clientDataDirPresence` + 打包 Widget 符号链接 + Hermes watch 根），即零回归。
 ### Windows 下谷歌反重力（Antigravity）用量显示 0 token / 旧缓存卡死 ✅ 已修复（2026-08-23）
 - **现象**：在 Windows 环境下，反重力（Antigravity）token 统计显示为 0 token 或长期停留在旧数据，状态异常。
 - **根因**：Windows 下 tokscale antigravity sync 无法从 DesktopAgent RPC 同步当前会话，导致缓存停留在旧数据；这是上游仍在跟踪的 Windows 问题：[tokscale #1129](https://github.com/junhoyeo/tokscale/issues/1129)。
