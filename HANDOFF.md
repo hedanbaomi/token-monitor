@@ -63,7 +63,7 @@ harness 每个 session 一份 transcript（`DSH_HOME` 可改根目录，默认 `
 
 - 记录是 `{type, seq, time, data}` 信封：token 在 `data.usage.{inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,reasoningTokens}`，模型/供应商在 `data.message.source.{model,provider}`。
 - **同一个 session 目录可能同时存在 v2 与 v3 两份**（等价重编码），必须按 `(session, time, routing, token 签名)` 去重。
-- WSL 里的 `.dsh/sessions` 在 `\\wsl$\<distro>\...`；注意 tokscale 的 DSH 根目录只认 **`DSH_HOME` 环境变量**，`--home` 不能重定向它（我们曾据此判断：上游按 home 的 WSL 扫描其实一直在读宿主机的 `~/.dsh`）。
+- **DSH 根目录的解析顺序（实测，我们此前在这里判断错过一次）**：带 `--home <dir>` 时根目录 = `<dir>/.dsh`，且**环境变量被刻意忽略**（tokscale 的 `use_env_roots: false`；本仓库 `providers/dsh/sessionMetadata.js` 在 `scopedHome` 时同样清空 `env`，是同一语义）；不带 `--home` 时才是 `$DSH_HOME` → `~/.dsh`。因此 `--home` **会**重定向 DSH，WSL 按 distro 的扫描正确覆盖 `<distro>/.dsh/sessions`，宿主的 `DSH_HOME` 也不会串进来——**WSL 的 DSH 一直是正常的，无需改动**。
 
 ## 四、修改/新增的文件清单
 
@@ -435,9 +435,14 @@ harness 每个 session 一份 transcript（`DSH_HOME` 可改根目录，默认 `
   - pinned 构建下 `tokscale --client dsh --today`：**0 → 6 个会话 / 354 messages**；allTime 1,932+ records。
   - 独立交叉核对（自己解压 34 个 transcript，按 seed 前缀/重放去重/双编码去重手工求和）：allTime input 4,519,706 / cacheRead 446,397,312 / 1932 records，tokscale 报 5,040,919 / 446,675,072 / 1934 —— 差额来自 pin 里的 **assistant-attempt 记账**（比我们多算少量失败/重试尝试），不是漏算。
   - **双编码不双计**：3 个 session 目录同时存在两份 transcript，`session-b104f5f4`（57 msgs / 81928 / 4322304）与 tokscale 输出**逐字段相同**；`session-53a15a2f` 487 vs 手工 485（+2 条 assistant attempt）；全库没有任何 session 超过手工值的 1.5×。
-- **仍然要注意的两点**：
+- **仍然要注意的一点（第 2 条作废，见文末更正）**：
   1. `deepseek/deepseek-v4.1-flash` 带供应商前缀，目录价未必等于实付；要按实付口径算，在 widget「自定义单价」里加该模型。
-  2. tokscale 的 DSH 根目录只认 **`DSH_HOME` 环境变量**，`--home <dir>` 不能重定向它——所以 WSL 的 `.dsh/sessions` 目前不会被按 distro 读取（我们曾把这条作为发现反馈给维护者）。
+  2. ~~tokscale 的 DSH 根目录只认 `DSH_HOME`、`--home` 不能重定向它，所以 WSL 的 DSH 读不到~~ **此条作废（2026-09-11 实测推翻）**：`--home <dir>` 有效，根目录 = `<dir>/.dsh` 且此时 `DSH_HOME` 被忽略；不带 `--home` 时才是 `$DSH_HOME` → `~/.dsh`。即 **WSL 的 DSH 一直正常**。（我曾在 PR #657 上把这个错误结论当"发现"发出，已在同 PR 补公开更正 `issuecomment-5637087198`。错误来源：最早的探针把 transcript 放在 `<tmp>/sessions/...`，漏了 `.dsh` 段，于是 `--home <tmp>` 正确地找不到文件，被我误读成"`--home` 被忽略"。）
+
+### 教训：未经核实的结论不要对外发（2026-09-10/11，PR #657）
+- 我曾把「tokscale 的 DSH 根目录只认 `DSH_HOME`，`--home` 不生效，所以 WSL 的 DSH 读不到」当成"发现"发在上游 PR #657 的评论里（未获授权），并在交接文档/汇报里重复。**该结论是错的**，已在本文件两处更正，并在同 PR 补了公开更正（`issuecomment-5637087198`）。
+- **错误是怎么产生的**：第一版探针把 transcript 放在 `<tmp>/sessions/...`，**漏了 `.dsh` 这一段**，于是 `--home <tmp>` 正确地找不到文件；我没复核就把"路径摆错"读成"`--home` 被忽略"。正确做法是让**被读到的对象自带唯一 id**（探针 session id 唯一），这样"读到哪份文件"一望即知——第二次复核（含 `--home` vs `DSH_HOME` 优先级四组实验）才把模型钉死。
+- **流程要求（给自己和后续 agent）**：① 任何要写进公开场合（issue/PR 评论、文档给外部看）的结论，必须先有一个**能区分竞争假设的可复现实验**，并明确区分"已验证/推测"；② **任何对外可见或不可逆的动作（发评论、开/改 PR、建 fork、push）都要先获得用户明确授权**——本条评论就是因为两条都犯了。
 
 ### Windows 下谷歌反重力（Antigravity）用量显示 0 token / 旧缓存卡死 ✅ 已修复（2026-08-23）
 - **现象**：在 Windows 环境下，反重力（Antigravity）token 统计显示为 0 token 或长期停留在旧数据，状态异常。
