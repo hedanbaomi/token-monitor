@@ -1,15 +1,15 @@
-# 交接文档 — ZCode + Cowork + DSH（DeepSeek Harness）监测集成
+# 交接文档 — ZCode + Cowork 监测集成
 
 > 本文档记录了在 token-monitor（github.com/Javis603/token-monitor）基础上所做的全部修改，供后续 agent 接手。
-> 基线版本：上游 main（v0.27.0+，当前已 rebase 到 **v0.55.0**）。所有改动在本地分支 `feature/zcode-cowork-support`，**未 push**。
+> 基线版本：上游 main（v0.27.0+，当前已 rebase 到 **v0.56.0**）。所有改动在本地分支 `feature/zcode-cowork-support`，**未 push**。
 
 ## 一、总体目标
 
-为 token-monitor 增加 **Claude Cowork** 与 **DeepSeek Harness（DSH）** 的 token 监测（两者 tokscale 都读不到，原生读取），并让 **ZCode** 走上游 tokscale 路径。
+为 token-monitor 增加 **Claude Cowork** 的 token 监测（tokscale 读不到，原生读取），并让 **ZCode** 走上游 tokscale 路径。
 
 - **ZCode**：上游 tokscale 已能扫描 `~/.zcode/cli/db/db.sqlite`。周期用量与历史 graph 都走 tokscale，不再原生 merge（避免与上游双计）。会话详情仍读本地 SQLite（tokscale 没有 ZCode transcript 路径）。
 - **Cowork**：上游仍扫不到 Claude Desktop 沙盒，继续原生读取，用量归到 `claude`。
-- **DSH（DeepSeek Harness）**：tokscale 4.15.x（当时最新）的 dsh 读取器只匹配未版本化的 `session.jsonl(.zstd)`，而 v3 之后的 harness 改写 `session.v3.jsonl.zstd`（旧文件保留、不再追加），于是**升级后写得的所有会话在 tokscale 眼里根本不存在**（周期用量/历史图/会话详情全丢）。fork 改为**原生读取** `~/.dsh/sessions/**`，并把 `dsh` 从 tokscale 客户端列表剔除（`clientCatalog.js` 标 `locallyParsed: true`）。
+- **DSH（DeepSeek Harness）**：**已回归上游，fork 不再有任何 DSH 专属代码**。v3 harness 改写 `session.v3.jsonl.zstd`，旧版 tokscale 只认未版本化名 → 用量整块消失。上游的做法是（a）合并我们的 PR #657 修好会话详情的版本化文件发现，（b）把 tokscale 换成一个 pinned 的 fork 构建（`scripts/vendor/tokscale.json`，`mode: override`）补上「版本化 transcript 发现 + assistant attempt 记账 + v3 seed 边界」三项修复。所以我们**曾经**本地实现的 DSH 原生读取已整体删除（v0.56.0 rebase 时按维护者要求丢弃），避免与 tokscale 重复解析/定价/去重/历史/WSL。详见第七节。
 
 ## 二、ZCode 的本地数据位置（关键）
 
@@ -33,7 +33,7 @@ ZCode 把 token 数据存在 CLI 运行时数据库里，**不是** `~/.zcode/pr
 - `tool_usage`：每轮用到的工具名（会话详情用）
 - `session`：`directory` 列 = 工作区路径（**项目归因**用）
 
-## 三、Cowork 与 DSH 的本地数据位置
+## 三、Cowork 与 DSH 的本地数据位置（DSH 仅作参考，已由上游读取）
 
 Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Claude Code，写标准 Claude Code JSONL：
 ```
@@ -47,7 +47,9 @@ Claude Cowork（桌面应用的 agent 模式）在 MSIX 沙盒里跑嵌入式 Cl
 
 ### DSH（DeepSeek Harness）
 
-harness 每个 session 一份 transcript：
+> **v0.56.0 起 fork 不再读取这里**：用量来自 pinned 的 tokscale fork 构建（`mode: override`），会话详情来自上游自己的 `providers/dsh/*`。下面只是路径/格式参考，排查上游问题时用。
+
+harness 每个 session 一份 transcript（`DSH_HOME` 可改根目录，默认 `~/.dsh`）：
 
 ```
 <DSH_HOME 或 ~/.dsh>/sessions/<encoded-cwd>/<session-id>/session[.<版本>].jsonl[.zstd]
@@ -61,7 +63,7 @@ harness 每个 session 一份 transcript：
 
 - 记录是 `{type, seq, time, data}` 信封：token 在 `data.usage.{inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,reasoningTokens}`，模型/供应商在 `data.message.source.{model,provider}`。
 - **同一个 session 目录可能同时存在 v2 与 v3 两份**（等价重编码），必须按 `(session, time, routing, token 签名)` 去重。
-- `DSH_HOME` 可改根目录（`providers/dsh/paths.js` 按 env 解析，原生读取同样支持）；WSL 侧的 `.dsh/sessions` 经 `\\wsl$\<distro>\...` 读取。
+- WSL 里的 `.dsh/sessions` 在 `\\wsl$\<distro>\...`；注意 tokscale 的 DSH 根目录只认 **`DSH_HOME` 环境变量**，`--home` 不能重定向它（我们曾据此判断：上游按 home 的 WSL 扫描其实一直在读宿主机的 `~/.dsh`）。
 
 ## 四、修改/新增的文件清单
 
@@ -72,8 +74,6 @@ harness 每个 session 一份 transcript：
 | `src/shared/coworkSession.js` | **Cowork 适配器**：动态发现 MSIX 沙盒路径，读所有 `*.jsonl`，解析 assistant 行的 usage；归到 `claude` 客户端 |
 | `tests/shared/zcodeSession.test.js` | ZCode 单测（周期分桶/成本/项目归因/会话详情/JSONL 兜底） |
 | `tests/shared/coworkSession.test.js` | Cowork 单测（归到 claude/模型合并/成本） |
-| `src/shared/providers/dsh/usage.js` | **DSH 适配器**：原生读 `~/.dsh/sessions/**`（含 `session.v3.jsonl.zstd`），复用 `sessionFiles.js` 的 zstd 解码与 `sessionDetail.js` 的记录语义，输出 tokscale 形状 JSON 供 `extractUsageFromTokscale` 合入；含按 (size, mtimeMs) 的解析缓存与 `buildDshHistoryGraph` |
-| `tests/shared/dshUsage.test.js` | DSH 适配器单测（双编码去重 / 本地午夜分桶 / 定价 / reasoning 拆分 / 历史图 / 缓存失效） |
 | `launch-background.vbs` | Windows 后台静默启动脚本（无 cmd 黑窗） |
 | `install-autostart.bat` / `uninstall-autostart.bat` | 开机自启安装/卸载 |
 | `assets/icons/zcode.svg` / `site/assets/icons/zcode.svg` | ZCode 图标（复用 zai.svg） |
@@ -88,14 +88,7 @@ harness 每个 session 一份 transcript：
 | `src/shared/usage.js` | `normalizeClientName` 加 `zcode`/`z-code` 归一化 |
 | `src/electron/renderer/app.js` | `KNOWN_CLIENTS`/`clientLabels`/`clientsWithIcon` 加 zcode；**会话点击白名单**加 `'zcode'`（否则点不开） |
 | `src/electron/main.js` | 两处 `startCollector` 加 `customModelPricing: () => settings.customModelPricing \|\| []`（函数式 getter，改单价立即生效） |
-| `package.json` | `check` 脚本注册新文件 |
-| `src/shared/providers/dsh/sessionFiles.js` | 文件名匹配扩展到可选版本段（`session[.vN].jsonl[.zstd]`）；同一 session 目录内**按版本优先列出活的 transcript**；`indexDshSessionHeaders` 改为首次命中优先 |
-| `src/shared/providers/dsh/sessionDetail.js` | 抽出共享解析 `dshTranscriptRecords()`（prompt/usage 记录 + fork seed 前缀 + 重放去重 + tokens），`parseDshDetailEvents()` 变成它的投影；usage.js 与会话详情共用同一语义 |
-| `src/shared/clientCatalog.js` | `dsh` 标 `locallyParsed: true` → `PARSE_LOCAL_CLIENTS` = proma/qodercn/dsh，tokscale 扫描与 graph 都不再请求 `dsh` |
-| `src/shared/wslUsage.js` | 新增 DSH 分支：WSL home 的 `.dsh/sessions` 经 `\\wsl$\` UNC 原生读取（与 proma 分支同构）——否则 parse-local 会让 WSL 的 DSH 用量整块消失 |
-| `src/shared/collector.js` | 新增 `readDshPeriods()`（宿主/WSL 共用）与 `withCustomModelPricing()`；`dshPeriods` 在 **anchor 快照之后**合入 today/month/allTime；`dshGraph` 进 rawGraphs/histories；`collectWsl` 传 `collectDshPeriods`；`canContinueWithNativeSource` 加 dsh |
-| `tests/shared/dshSessionFiles.test.js`、`tests/shared/dshSessionDetail.test.js`、`tests/shared/wslUsage.test.js` | v3 文件名与优先顺序、header 索引、会话详情打开 v3 session、WSL DSH 分支与"无数据不读" |
-| `tests/shared/clientCatalog.test.js`、`tests/shared/collectorSessionTimestamps.test.js`、`tests/shared/collectorCapabilityFallback.test.js`、`tests/shared/collectorCancellation.test.js` | 上游测试按 fork 语义调整：PARSE_LOCAL_CLIENTS 含 dsh；dsh 不再走 tokscale，元数据缓存改为在 index 缝计数；capability probe 用例里"未知 client id"的角色由 dsh 换成 unsloth |
+| `package.json` | fork-local 的 `check` 脚本（上游没有）注册新文件，并把被上游 `providers/<id>/` 重构挪走的路径改到新位置 |
 
 ## 五、关键设计决策与坑
 
@@ -106,13 +99,8 @@ harness 每个 session 一份 transcript：
 5. **会话点击白名单**：`app.js` 的 `els.breakdown.addEventListener('click')` 有硬编码客户端列表，必须同时保留上游的 `'dsh'`/`'reasonix'` 和我们的 `'zcode'` 才能点开会话详情。
 6. **项目归因**：ZCode 会话需要 `projectId`/`projectLabel` 才能进「项目」视图；从 `session.directory` 用 `hashKey`+`normalizeProjectPath` 算（复刻 collector.js 的 `projectIdentity`，避免循环依赖）。
 
-7. **DSH 原生读取（v3 文件名）**：根因只是文件名——把 `session.v3.jsonl.zstd` 改名成旧名后 tokscale 能 100% 正确解析（内容信封完全兼容）。我们**不做临时镜像/junction 去骗 tokscale**：那样既要在用户数据目录旁写东西，又要判断"同一会话两份文件哪个算数"，而原生读取把这些都收进自己的去重逻辑里。
-8. **同一会话两份编码必须去重**：v3 升级会把旧 transcript **整份重编码**成新文件并保留旧文件。实测两份文件的 usage 事件集合**完全相同**（时间/模型/供应商/token 逐条一致），按 `(session, time, routing, token 签名)` 去重；不去重就是**翻倍**。
-9. **记录语义必须与 tokscale 对齐**：fork 会话的 seed 前缀（`seq < session.seedLength` 不计）、重放行去重、`output` 与 `reasoning` 的拆分口径（`dsh` 属于 tokscale 的 disjoint-reasoning 客户端：entry 里 `output = 原始 output − reasoning`，由共用 token 数学加回去）全部复用 `sessionDetail.js`——它的注释逐条对应 tokscale 的 `dsh.rs`。
-10. **DSH 必须在 anchor 快照之后合入**：`collectUsageOnce` 里的 `windowsPeriods`（约 1677 行）是下一次 watch tick 的 anchor。dsh 若在它之前合入，anchor 就带上 dsh，下一次 `applyPeriodDelta(anchor.month, today, anchor.today)` 会把 dsh 的 month 重复叠加（实测会明显偏大）。所以 dsh 的 merge 放在快照之后（与 cowork 同构），并在读完时**单独** `decorateLocalPeriods(dshPeriods)` 用 transcript header 的 `createdAt` + 文件 mtime 回填 startedAt/lastUsedAt（复用上游 dsh 元数据缓存，不额外重走树）。
-11. **解析缓存**：DSH transcript 是 zstd 帧，只能整份解压；watch tick 几秒一次，全量重解本机 30 个文件 ≈ 0.9s（明显 CPU 抖动）。`usage.js` 按 `(size, mtimeMs)` 缓存解析结果：冷 887ms → 热 15ms，文件被追加（size 变化）立即失效，文件消失则从缓存剔除。
-12. **WSL**：`dsh` 变 parse-local 后不会再进 WSL 的 tokscale CSV，因此 WSL home 的 `.dsh/sessions` 必须原生读（与 proma 的 WSL 分支同构），否则只有宿主机的 DSH 有数据、发行版里的整块消失。
-13. **成本口径**：DSH transcript 不带 cost。定价走 `resolveModelPricing`（tokscale `pricing` 命令 → `custom-pricing.json`，离线回退到本地 catalog 缓存，6h 缓存），再用 `withCustomModelPricing()` 让 widget 里的自定义单价（每百万）覆盖目录价。实测与 tokscale 对同一批会话算出的美元**误差 0**。
+7. **DSH 不再由 fork 读取（v0.56.0 起）**：曾有一版原生适配器（`providers/dsh/usage.js` + collector 接线 + `locallyParsed: true`），因为旧 tokscale 只认未版本化的 transcript 名。上游随后 (a) 合并 PR #657 修好版本化文件发现，(b) 把 tokscale 换成 pinned 的 fork 构建（`mode: override`）补上发现/记账/seed 边界，所以按维护者要求**整体删除**了本地实现，避免与 tokscale 重复解析/定价/去重/历史/WSL。**排查 DSH 不要再找 fork 代码**：用量看 `scripts/vendor/tokscale.json`（pin 的构建），会话详情看上游 `providers/dsh/*`。
+8. **如果要再走原生读取，必须一次做全**（留作参考，避免重蹈覆辙）：① `clientCatalog` 的 `locallyParsed` 是「别让 tokscale 扫 dsh」的开关——只加原生合并而不加它，会**双计**；只删它而留着原生合并，同样双计。② 新增 parse-local 客户端必须**登记 today 分区**（`freshPartitions.<id>` 定向分支 + `todayPartitions.<id>` 全量分支，且合并在 anchor 快照**之前**），否则定向 watch tick 会把该客户端读成 0，会话归档再把会话「恢复」成未分类（输入不再区分缓存命中/未命中）。这两条当时都踩过并有测试覆盖。
 
 ## 六、更新维护流程（rebase）
 
@@ -411,6 +399,17 @@ harness 每个 session 一份 transcript：
   - `git diff --check`：Clean；
   - 真实采集：`npm run agent:once -- --dry-run` 采集正常。
 
+### 2026-09-11 rebase：v0.55.0 → v0.56.0 ✅ DSH 交还上游（主动丢弃本地实现）
+- `git fetch` 后 `origin/main` 从 `f8adfd7`(v0.55.0) 前进到 `2f60827`(v0.56.0)。**我们的 PR #657 已合并**（合并为 `0720aaa fix(dsh): support versioned session transcripts`），并且维护者走的是他自己说过的 tokscale 路线：`011d0cb fix(tokscale): pin upstream scanner and DSH compatibility fixes (#663)` 把 `scripts/vendor/tokscale.json` 翻回 `mode: override`（pin `Javis603/tokscale` 的构建，含「version-tagged transcript discovery + assistant-attempt token accounting」），`04a355b` 再升到 `3217424c`（追加「v3 inherited-seed boundary handling」）。
+- **按用户/维护者要求：涉及 DSH 的本地改动一律不保留，取上游**。用 `git rebase -i`（`GIT_SEQUENCE_EDITOR` 把 todo 里三个 `fix(dsh):` 提交改成 `drop`）丢弃了：`3c66fd6` 原生读取主体（含 `providers/dsh/usage.js`、collector 接线、`locallyParsed`、WSL 分支、5 个测试文件）、`2d7ea7d` 分区修复、`49e4e8a` 文件名匹配收紧（上游已等价实现）。好处是那次分区回归的成因（解析本地化的合并位置）也随之消失。
+- **冲突**：仅 `src/shared/hubBuildRegistry.json` + `worker/` 副本两处（生成文件）——取上游后 `node scripts/update-hub-build.js` + `npm run sync:worker` 重新生成；`worker/src/shared/currency.js` 的 CRLF-only 差异 `git checkout --` 即可。其余 40+ 本地提交干净重放，`src/shared/providers/dsh/*`、`clientCatalog.js`、`wslUsage.js`、以及 6 个相关测试文件现在与上游**逐字节相同**（`git diff origin/main HEAD -- <那些路径>` 为空）。
+- **`package.json` 的 `check` 脚本**：这是 fork 自加的（上游没有），我原先把「路径修正」和 DSH 测试注册一起提交进了被丢弃的 `3c66fd6`。丢弃后 `npm run check` 又指向 11 个已被上游重构挪走的旧路径，因此**单独**补了一个非 DSH 的修正提交（只在 fork 内，不涉及任何 DSH 语义）。
+- **依赖/二进制**：`npm install`（上游 `chore(deps)` 无 tokscale 版本变化，仍是 4.15.1）后必须跑 **`npm run ensure:tokscale`** 下载 pin 的 fork 构建——否则 `npm start`/`npm run dev` 自带的 `ensure:tokscale` 会在启动时做这件事；注意**换二进制时要先停掉正在运行的 app**，否则 Windows 会因 `tokscale.exe` 被占用而 `EPERM: rename`。
+- **验证（这次是「上游修好了」而不是「我们修好了」的验证）**：
+  - pinned 构建对 DSH 的 `--today` 从 **0** 变成 6 个会话 / 354 messages（此前整天为 0）；
+  - 独立交叉核对：自己解压全部 34 个 transcript、按文档规则（seed 前缀跳过、重放去重、双编码只算一次）算出 allTime 1932 records input 4,519,706 / cacheRead 446,397,312；tokscale 报 1934 / 5,040,919 / 446,675,072——**消息数只差 2、output 只差 2**，差额来自 pin 里的 assistant-attempt 记账（比我们多算少量失败/重试尝试），不是漏算；
+  - **双编码不双计**：磁盘上 3 个 session 目录同时有两份 transcript，`session-b104f5f4`（57 msgs / 81928 / 4322304）与 tokscale 输出**逐字段相同**；`session-53a15a2f` 487 vs 485 msgs（+2 条 assistant attempt），全库没有任何 session 超过我们的 1.5×。
+
 ### 2026-09-10 rebase：v0.54.0 → v0.55.0 ⚠️ 手工合并 4 处冲突
 - `git fetch origin` 后 `origin/main` 从 `52bed5f`(v0.54.0) 前进 21 个提交到 `f8adfd7`(v0.55.0)。`git rebase origin/main` 在 4 个提交上冲突，解决后 41 个本地提交重放；第 42 个 `d38edc5 chore: sync worker shared and update hub build registry for v0.54.0` 在冲突解决后**已无内容**（`worker/src/shared` 与 registry 都已是当前状态，重放产物为空）被 git 自动 drop——`npm run sync:worker` 现在确认零漂移，`hubBuild.test.js` 全绿，所以该提交的意图已由后续提交 + 上游自身同步满足（分支回滚点：`backup/pre-v0.55-rebase`）。
 - **冲突 1–3（`src/shared/collector.js` 顶部 require 区）**：上游把各集成搬进 `src/shared/providers/<x>/`（#622/#624/#625）：`limitResetBoundary.js`→`limits/resetBoundary.js`、`antigravitySelfSync`→`providers/antigravity/selfSync.js`、`opencodeSession`→`providers/opencode/session.js`、`reasonixSessionDetail`→`providers/reasonix/sessionDetail.js`。我们早期提交里的旧路径 require 与它们冲突。**解决**：一律采用上游新路径；顺手删掉早已无用的 `const zcodeSession = require('./zcodeSession')`（ZCode 改走 tokscale 后 collector 不再引用它，eslint 会报 unused）。
@@ -422,34 +421,24 @@ harness 每个 session 一份 transcript：
 
 ## 七、已解决问题
 
-### DeepSeek Harness（DSH）用量完全统计不到（当天 deepseek-v4.1-flash 一条都没记） ✅ 已修复（2026-09-10）
-- **现象**：2026-09-10 用 DeepSeek Harness 调 `deepseek/deepseek-v4.1-flash`，仪表的 DSH 一行**完全没有今天的用量**（tokscale `--today`/`--month` 的 dsh 条目为 0 条），所有 DSH 数字都停在 8 月。
+### DeepSeek Harness（DSH）v3 会话完全统计不到（一整天 deepseek-v4.1-flash 一条没记） ✅ 已由上游修复（2026-09-11 收尾）
+- **现象**：2026-09-10 用 DSH 调 `deepseek/deepseek-v4.1-flash`，仪表的 DSH 一行**完全没有今天的用量**（tokscale `--today`/`--month` 的 dsh 条目为 0 条），所有 DSH 数字停在 8 月。
 - **根因**：DSH v3 把 transcript 写到**新文件名** `session.v3.jsonl.zstd`，旧名 `session.jsonl(.zstd)` 保留但不再追加：
-  1. tokscale 4.15.1（当时最新）的 dsh 读取器只匹配旧名 → **升级后写的会话对 tokscale 完全不存在**；
-  2. 我们自己的 `providers/dsh/sessionFiles.js`（会话详情用）也是固定名字集合 → 这些会话连详情都点不开。
-  3. **实测确认**：把 v3 文件改名成 `session.jsonl.zstd` 再让 tokscale 扫（`DSH_HOME` 指向临时树），tokscale 立刻返回正确的 token/消息数/成本——内容信封完全兼容，问题 100% 在文件名。
-- **修复**：
-  1. `providers/dsh/sessionFiles.js`：文件名匹配扩展为可选版本段（`session[.vN].jsonl[.zstd]`）；同一 session 目录内按版本号优先列出活的 transcript；`indexDshSessionHeaders` 首次命中优先。
-  2. 新增 `providers/dsh/usage.js`：**原生读 DSH**（周期 + 历史图），复用 `sessionFiles.js` 的解码与 `sessionDetail.js` 的记录语义；同一会话的两份编码按 `(session,time,routing,token)` 去重；输出 tokscale 形状 JSON 交给 `extractUsageFromTokscale`。
-  3. `collector.js`：`clientCatalog.js` 给 `dsh` 标 `locallyParsed` → tokscale 扫描/图都不再请求 dsh；原生结果在 anchor 快照之后 merge；新增 `withCustomModelPricing()`；`dshGraph` 并入 rawGraphs/histories。
-  4. `wslUsage.js`：新增 DSH 分支，WSL home 的 `.dsh/sessions` 经 `\\wsl$\` 原生读。
-  5. 时间戳：读完 dsh 周期后单独 `decorateLocalPeriods(dshPeriods)`，用 header `createdAt` + 文件 mtime 回填 startedAt/lastUsedAt。
-- **验证**：
-  - 对 tokscale **仍能看到的 16 个会话**，原生读数 vs tokscale 输出：input/output/cacheRead/messageCount **逐条完全相等**，成本误差 0（例：`session-53a15a2f…` = 1047701 / 179435 / 176406528 / 485 msgs / $2.045758214）。
-  - 修复后真实采集：`collectUsageOnce({clients:'dsh'})` → today **46.4M tokens / 2 sessions / $0.68**（修复前 0），allTime 268M；`history.summary.totalTokens` 与 allTime 周期合计**一致**（历史图也补上了 9-10 这一天）。
-  - 新增 `tests/shared/dshUsage.test.js`（8 例）+ v3 文件名/详情/ WSL 用例，全部通过。
-- **注意**：`deepseek/deepseek-v4.1-flash` 带供应商前缀，目录价能查到但未必等于实付；想按实付口径算，可在 widget「自定义单价」里加 `deepseek/deepseek-v4.1-flash`（fork 的 `withCustomModelPricing()` 会优先用自定义单价）。
+  1. tokscale 4.15.1 的 dsh 读取器只匹配旧名 → **升级后写的会话对 tokscale 完全不存在**（这是用量为 0 的直接原因）；
+  2. 上游自己的 `providers/dsh/sessionFiles.js`（会话详情用）也是固定名字集合 → 这些会话连详情都点不开，且时间戳回填会去读**过时的升级前副本**。
+- **归属判定（为什么最终是提 PR 而不是本地修）**：`把 v3 文件改名成旧名后 tokscale 返回完全正确的计数`（1,047,701 input / 179,435 output / 485 messages）→ **是文件名匹配缺陷，不是记录格式问题，属工具自身 bug**。
+- **上游的最终修复（两个部分，都是上游的代码）**：
+  1. **会话详情/文件发现**：我们提的 **[PR #657](https://github.com/Javis603/token-monitor/pull/657) 已被合并**（`0720aaa fix(dsh): support versioned session transcripts`）——`sessionFiles.js` 匹配 `session[.vN].jsonl[.zstd]`、同目录内**版本化文件优先**、`indexDshSessionHeaders` 首个命中优先。
+  2. **用量/历史**：维护者按他原本的意向在 tokscale 侧修，改用 pinned 的 fork 构建：`011d0cb`（#663）把 `scripts/vendor/tokscale.json` 翻回 `mode: override` 并 pin `Javis603/tokscale`（含「version-tagged transcript discovery + assistant-attempt token accounting」），`04a355b` 升到 `3217424c`（追加「v3 inherited-seed boundary handling」）。
+- **我们在 v0.56.0 做的**：按维护者意见**整体删除**了 fork 曾有的 DSH 原生读取（`providers/dsh/usage.js` + collector 接线 + `locallyParsed` + WSL 分支 + 相关测试），把 DSH 完全交还上游——避免与 tokscale 重复解析/定价/去重/历史/WSL。相关提交在 rebase 时用 `git rebase -i` 的 `drop` 丢弃。
+- **本机验证（上游修好的证据）**：
+  - pinned 构建下 `tokscale --client dsh --today`：**0 → 6 个会话 / 354 messages**；allTime 1,932+ records。
+  - 独立交叉核对（自己解压 34 个 transcript，按 seed 前缀/重放去重/双编码去重手工求和）：allTime input 4,519,706 / cacheRead 446,397,312 / 1932 records，tokscale 报 5,040,919 / 446,675,072 / 1934 —— 差额来自 pin 里的 **assistant-attempt 记账**（比我们多算少量失败/重试尝试），不是漏算。
+  - **双编码不双计**：3 个 session 目录同时存在两份 transcript，`session-b104f5f4`（57 msgs / 81928 / 4322304）与 tokscale 输出**逐字段相同**；`session-53a15a2f` 487 vs 手工 485（+2 条 assistant attempt）；全库没有任何 session 超过手工值的 1.5×。
+- **仍然要注意的两点**：
+  1. `deepseek/deepseek-v4.1-flash` 带供应商前缀，目录价未必等于实付；要按实付口径算，在 widget「自定义单价」里加该模型。
+  2. tokscale 的 DSH 根目录只认 **`DSH_HOME` 环境变量**，`--home <dir>` 不能重定向它——所以 WSL 的 `.dsh/sessions` 目前不会被按 distro 读取（我们曾把这条作为发现反馈给维护者）。
 
-- **上游 PR（2026-09-10）**：确认这是**工具自身**的缺陷（不是我们的本地改动导致）——上游 main 的 `providers/dsh/sessionFiles.js` 仍只匹配未版本化文件名，且其 pinned tokscale 4.15.1 的 dsh reader 同样只认旧名；仓库里没有等价的修复（相关 PR #408/#419/#410/#412/#409/#427/#448 都已并入且都不是这件事；open issue #497 讲的是 DSH Desktop 的另一个目录，不是改名）。已提 PR，并按维护者要求**拆成两半**：
-  - **[#657 fix(dsh): discover versioned session transcripts](https://github.com/Javis603/token-monitor/pull/657)**（**当前唯一的上游 PR**，只含会话详情 + 版本化文件发现 + 测试 + `docs/providers/dsh.md`）：`sessionFiles.js` 匹配 `session.vN.*` 并在同一 session 目录内**把版本化文件排在前面**、`indexDshSessionHeaders` 改为首个命中优先；`sessionDetail.js` 把逐行解析抽成一个函数（行为不变，`parseDshDetailEvents` 仍是它的投影）。
-  - **用量迁移那一半没有提 PR**：维护者倾向不把 DSH 改成 parse-local（不愿在 widget 里重复 tokscale 的解析/定价/去重/历史/WSL），并打算在 tokscale 侧修文件名。GitHub 也不允许以「只存在于 fork 的分支」作为 base（无法堆叠跨仓 PR），所以在 fork 里保留分支 **`feat/dsh-native-usage`**（`hedanbaomi/token-monitor`，基于 `fix/dsh-v3-transcripts`，已推送；本地同名分支也在），需要时一条命令即可提 PR 或直接丢弃。分支内容 = 本仓库现有 DSH 原生读取的全套（usage.js / clientCatalog / collector / wslUsage / 分区 / 测试 / 文档）。
-- **给维护者的 tokscale 侧证据**（已作为 #657 的评论贴出，实证来自本机）：
-  1. 把 v3 transcript 复制成旧名放进临时 `DSH_HOME`，tokscale 复现出**完全一致**的计数（1,047,701 input / 179,435 output / 485 messages）→ 缺的就是文件名；
-  2. 同一批记录同时以两个 tokscale 已认的名字暴露时，它仍只报 **485**（不是 970）；把 2 条记录的残缺副本和完整 transcript 并排放，两个方向都报 **485** → tokscale 会**并集 + 按记录签名去重**，所以加版本化文件名不会双计，也不怕读到旧副本；
-  3. 附带发现：tokscale 的 DSH 根目录走 **`DSH_HOME` 环境变量**，`--home <dir>` 不能重定向它 → 上游按 home 的 WSL 扫描实际一直在读宿主机的 `~/.dsh`。
-- **本仓库（fork）当前状态**：`feature/zcode-cowork-support` **仍未 push**，且**保留完整的 DSH 原生读取**（这是本机 DSH 用量今天能正常统计的唯一原因）。只把 PR 分支推到了我们自己的 fork；本仓库的 remote 里多了 `fork`（= `hedanbaomi/token-monitor`）。
-- **日后迁回 tokscale 路径的做法**（等官方发布或维护者的 fork 构建可用时）：DSH 原生读取的全部价值就是「旧版本 tokscale 认不出 v3 文件名」，所以迁移应当**一次删干净**：删 `providers/dsh/usage.js` + `dshUsage` 相关接线（collector 的 `readDshPeriods`/`dshPeriods`/`dshGraph`/分区登记、`wslUsage` 的 `collectDshPeriods`）+ 把 `clientCatalog` 的 `dsh.locallyParsed` 去掉 + 删对应测试。**注意**：`locallyParsed: true` 是「tokscale 不要扫 dsh」的开关，如果**只**去掉它却留着原生合并，DSH 会被算两遍。tokscale 侧的落地方式这个仓库已经现成：`scripts/vendor/tokscale.json` 的 `mode: override` + `Javis603/tokscale` fork 的 release（每个平台 sha256 校验），正是为「上游发版慢」准备的，切 `override` 比新增基础设施简单。
-- **留意的 rebase 冲突点**：`providers/dsh/sessionDetail.js` —— 上游 #657 会带来同一份 `dshTranscriptRecords` 抽取，但**不导出**它（上游没有消费者）；我们的 fork 多一行 `dshTranscriptRecords,` 导出给 `usage.js` 用。下次 rebase 到这个文件时按「保留我们的导出行、其余用上游」解决即可。
 ### Windows 下谷歌反重力（Antigravity）用量显示 0 token / 旧缓存卡死 ✅ 已修复（2026-08-23）
 - **现象**：在 Windows 环境下，反重力（Antigravity）token 统计显示为 0 token 或长期停留在旧数据，状态异常。
 - **根因**：Windows 下 tokscale antigravity sync 无法从 DesktopAgent RPC 同步当前会话，导致缓存停留在旧数据；这是上游仍在跟踪的 Windows 问题：[tokscale #1129](https://github.com/junhoyeo/tokscale/issues/1129)。
@@ -488,9 +477,9 @@ node -e "const z=require('./src/shared/zcodeSession'); const p=z.collectZcodeUsa
 npm run dev   :: 或双击 launch-background.vbs
 ```
 
-:: DSH 专项测试（适配器 / 文件名 / 会话详情 / WSL）
-node --test tests/shared/dshUsage.test.js tests/shared/dshSessionFiles.test.js tests/shared/dshSessionDetail.test.js tests/shared/wslUsage.test.js
-:: DSH 真实数据（原生读数）
-node -e "const u=require('./src/shared/providers/dsh/usage'); const r=u.collectDshRows({}); console.log(r.length, 'rows');"
-:: DSH 周期（today/month/allTime）
-node -e "const u=require('./src/shared/providers/dsh/usage'); const p=u.buildDshPeriods({allTimeSince:'2025-01-01'}); const t=p.today; console.log('today', t.totalInput+t.totalOutput+t.totalCacheRead+t.totalCacheWrite, t.totalMessages, Object.keys(t.entries?{}:{}).length);"
+:: DSH 现在完全走上游：用量来自 pin 的 tokscale 构建
+npm run ensure:tokscale                 :: 换/修复 pin 的二进制（换之前先停掉正在运行的 app，否则 EPERM）
+npx tokscale --json --client dsh --group-by client,session,model --today   :: 应为非 0（v0.55 时这里恒为 0）
+node --test tests/shared/dshSessionFiles.test.js tests/shared/dshSessionDetail.test.js  :: 上游的版本化发现测试
+:: DSH 会话详情（尺寸/时间戳）自检：确认磁盘上确实有 v3 文件
+node -e "const{resolveDshSessionsRoot,dshSessionFiles}=require('./src/shared/providers/dsh/sessionFiles'); const r=resolveDshSessionsRoot({}); const f=dshSessionFiles(r); console.log(f.length, f.filter(x=>/session\.v\d+\./.test(x)).length + ' versioned');"
