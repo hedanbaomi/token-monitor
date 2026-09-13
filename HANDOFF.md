@@ -1,7 +1,7 @@
 # 交接文档 — ZCode + Cowork 监测集成
 
 > 本文档记录了在 token-monitor（github.com/Javis603/token-monitor）基础上所做的全部修改，供后续 agent 接手。
-> 基线版本：上游 main（v0.27.0+，当前已 rebase 到 **v0.56.0**）。所有改动在本地分支 `feature/zcode-cowork-support`，**未 push**。
+> 基线版本：上游 main（v0.27.0+，当前已 rebase 到 **v0.57.0**）。所有改动在本地分支 `feature/zcode-cowork-support`，**未 push**。
 
 ## 一、总体目标
 
@@ -398,6 +398,16 @@ harness 每个 session 一份 transcript（`DSH_HOME` 可改根目录，默认 `
   - ESLint：`npm run lint` 全绿（0 errors / 0 warnings）；
   - `git diff --check`：Clean；
   - 真实采集：`npm run agent:once -- --dry-run` 采集正常。
+
+### 2026-09-12 rebase：v0.56.0 → v0.57.0 ⚠️ 4 处冲突（全在 collector / 生成文件）
+- `git fetch` 后 `origin/main` 从 `2f60827`(v0.56.0) 前进到 `bbe07de`(v0.57.0)；46 个本地提交重放。回滚点 `backup/pre-v0.57-rebase`。
+- **冲突 1（`3facb04` ZCode+Cowork 主体）**：上游把 `watchClientRootsForClients(clientsCsv)` 改成 `(clientsCsv, options = {})`（新增 `customScanPaths`），正好落在我们插入的 `tokscaleClientsCsv`/`coworkEnabled`/`zcodePricingMap` 辅助块旁边。**解决**：保留我们的辅助块，采用上游新签名。
+- **冲突 2（`08f58ce` antigravity 本地兜底）**：上游给 `runTokscaleGraph` 加了 `customScanPaths` 形参。**解决**：保留我们的 `runTokscaleAtHome`（本地兜底要用），采用上游新签名；丢掉我们那份过期签名。
+- **冲突 3（`af2525c` antigravity 当日时间戳）**：require 区新增依赖撞车。**解决**：两边都留——上游的 `./customScanPaths`(`normalizeCustomScanPaths`/`tokscaleExtraDirsEnv`) 与 `./tokscaleClientMapping`(`TOKSCALE_CLIENT_ALIASES`/`tokscaleScanClientIds`)，以及我们的 `./antigravityLocalMirror`。
+- **冲突 4（`daad5be` worker/registry 同步）**：生成文件。**解决**：取上游后 `node scripts/update-hub-build.js` + `npm run sync:worker`（v0.57 的 vendored 模块列表变成 14 个，多了 `providerHelpers`/`hubProtocol` 之类，脚本自己处理）。
+- **上游 v0.57 值得注意**：①**tokscale 依赖升到 `^4.16.0`**，`scripts/vendor/tokscale.json` 仍是 `mode: override`、baseVersion 4.16.0、pin 到含「downstream DSH fixes through 3d6e23b6」的 fork 构建（DSH 依旧走上游，fork 无 DSH 代码）；②新增 `src/shared/customScanPaths.js`（自定义扫描路径 + `TOKEN_MONITOR_TOKSCALE_EXTRA_DIRS`）与 `src/shared/tokscaleClientMapping.js`（`TOKSCALE_CLIENT_ALIASES` 从 collector 抽出）；③Worker 新增 `hubProtocol.js` 与 hub 统计传输优化；④Droid CLI/Factory 追踪（#682）、Volcengine Agent Plan via arkcli（#655）、`fix(dsh): promote versioned transcripts reliably on Windows`（#680，继续完善 DSH 发现）。
+- **验证**：完整 `npm test` = **4387 tests / 4377 pass / 2 fail**。两个失败都已定位：①`symlinked packaged Widget artifacts`（Windows 符号链接权限，长期既有环境问题）；②`real vendor manifest derives complete target coverage from @tokscale/cli`——manifest 已要求 baseVersion 4.16.0 而 `node_modules` 仍是 4.15.1，需 `npm install` 后消除（见下）。我们的专项测试（zcode/cowork/antigravity/sessionDetail/history/clientHealth）与 DSH 相关上游测试全绿。
+- **本机待办（未执行，需先停 app）**：`npm install`（把 `@tokscale/cli*` 升到 4.16.0）+ `npm run ensure:tokscale`（下载 4.16.0 的 pin 构建）。**注意**：`node_modules` 是主检出与 worktree 共用的，升级后基于 v0.56.0 的分支（如 `fix/cursor-usage-archive`）会因为 manifest 仍是 4.15.1 而让 `ensure:tokscale` 拒绝启动，必须一并 rebase 到 v0.57.0 才能再启动 app。
 
 ### 2026-09-11 rebase：v0.55.0 → v0.56.0 ✅ DSH 交还上游（主动丢弃本地实现）
 - `git fetch` 后 `origin/main` 从 `f8adfd7`(v0.55.0) 前进到 `2f60827`(v0.56.0)。**我们的 PR #657 已合并**（合并为 `0720aaa fix(dsh): support versioned session transcripts`），并且维护者走的是他自己说过的 tokscale 路线：`011d0cb fix(tokscale): pin upstream scanner and DSH compatibility fixes (#663)` 把 `scripts/vendor/tokscale.json` 翻回 `mode: override`（pin `Javis603/tokscale` 的构建，含「version-tagged transcript discovery + assistant-attempt token accounting」），`04a355b` 再升到 `3217424c`（追加「v3 inherited-seed boundary handling」）。
