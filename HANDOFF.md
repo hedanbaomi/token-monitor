@@ -1,7 +1,7 @@
 # 交接文档 — ZCode + Cowork 监测集成
 
 > 本文档记录了在 token-monitor（github.com/Javis603/token-monitor）基础上所做的全部修改，供后续 agent 接手。
-> 基线版本：上游 main（v0.27.0+，当前已 rebase 到 **v0.57.0**）。所有改动在本地分支 `feature/zcode-cowork-support`，**未 push**。
+> 基线版本：上游 main（v0.27.0+，当前已 rebase 到 **v0.58.0**）。所有改动在本地分支 `feature/zcode-cowork-support`，**未 push**。
 
 ## 一、总体目标
 
@@ -399,6 +399,16 @@ harness 每个 session 一份 transcript（`DSH_HOME` 可改根目录，默认 `
   - `git diff --check`：Clean；
   - 真实采集：`npm run agent:once -- --dry-run` 采集正常。
 
+### 2026-09-13 rebase：v0.57.0 → v0.58.0 ⚠️ 主线仅 1 处冲突（生成文件）
+- `git fetch` 后 `origin/main` 从 `bbe07de`(v0.57.0) 前进到 `bce50db`(v0.58.0)，16 个提交；主线 48 个本地提交重放。回滚点 `backup/pre-v0.58-rebase`。
+- **冲突**：只有生成的 `hubBuildRegistry.json`（src + worker，出现在 `59f2e18` 那次 registry 同步里）——**解决**：取上游后 `node scripts/update-hub-build.js` + `npm run sync:worker` 重新生成，单独提交为 `chore(hub): refresh the build registry after the v0.58.0 rebase`。其余 47 个提交（含 collector 的 antigravity 本地兜底、zcode/cowork 适配器等）全部干净重放。
+- **DSH**：继续纯上游（`providers/dsh/*`、`clientCatalog.js`、`wslUsage.js` 与上游逐字节相同）。
+- **上游 v0.58 值得注意**：①**tokscale 依赖升到 `^4.17.0`**，pin 仍是 `mode: override`、baseVersion 4.17.0、release `token-monitor-09cf5471`（reason 里明确：pin 仍然必需，因为 widget 依赖下游的 session/workspace 报告能力）；②`#709 perf(collector): stop zcode wal-index from re-triggering its own scan`——和我们的 ZCode 客户端相关的采集/监听优化；③`#700` Kimi 月度额度改用 Code API usage pools、`#706` Antigravity OAuth 额度对齐 CLI 端点、`#704` macOS 托盘 Cmd+Q、`#708` macOS 26 runner；④`app.js`(+635/-…) 与 `main.js`(+188/-…) 的大幅重构（会话/工作区报告、设置面板等），我们的改动（会话点击白名单、clientLabels、customModelPricing getter）与之自动合并无冲突。
+- **cursor 分支**（保持"纯上游 + 仅 cursor 修复"）单独 rebase 到 v0.58.0：1 个提交重放，冲突在 `sessionUsageArchive.addArchivedSession`（上游给它加了 `archiveKey = null` 形参，而 cursor 修复把 guard 换成了 `isUnstableArchivedSession`）——**解决**：两者合并，采用上游签名 + 我们的 guard，并把 `archiveKey` 传给 guard（`isUnstableArchivedSession(session, archiveKey)`，比原提交多一份信息，guard 在 session id 缺失时靠它兜底）。新 tip `07d28c5`，回滚点 `backup/pre-v0.58-cursor`。
+- **集成分支重建**：`integration/product` = `feature/zcode-cowork-support`(v0.58 + fork 特性) + cherry-pick cursor 修复（`26fcc91`），cherry-pick 干净无冲突。旧的 `integration/product-0.57` 保留为 0.57 快照（可删）。
+- **依赖升级（已执行）**：停 app 后 `npm install`（4.16.0 → **4.17.0**）+ `npm run ensure:tokscale`（release `token-monitor-09cf5471`）；`tokscale --client dsh --today` 非 0（86 messages），DSH 统计正常。
+- **验证**：`npm test`（集成分支）= 4396+ tests / 仅 Windows 符号链接环境失败；`npm run check`、`eslint .` 全绿。
+
 ### 2026-09-12 rebase：v0.56.0 → v0.57.0 ⚠️ 4 处冲突（全在 collector / 生成文件）
 - `git fetch` 后 `origin/main` 从 `2f60827`(v0.56.0) 前进到 `bbe07de`(v0.57.0)；46 个本地提交重放。回滚点 `backup/pre-v0.57-rebase`。
 - **冲突 1（`3facb04` ZCode+Cowork 主体）**：上游把 `watchClientRootsForClients(clientsCsv)` 改成 `(clientsCsv, options = {})`（新增 `customScanPaths`），正好落在我们插入的 `tokscaleClientsCsv`/`coworkEnabled`/`zcodePricingMap` 辅助块旁边。**解决**：保留我们的辅助块，采用上游新签名。
@@ -477,6 +487,23 @@ harness 每个 session 一份 transcript（`DSH_HOME` 可改根目录，默认 `
 - **根因**：`zcodeSession.js` 和 `coworkSession.js` 的 `utcDayBoundsMs`/`utcMonthBoundsMs` 用 `Date.UTC(d.getUTCFullYear()...)` 按 **UTC** 切日/月边界；但项目其它所有部分都按**设备本地时区**切边界——collector 的 `localTodayKey()`（`getFullYear()/getMonth()/getDate()`）、`computePeriodWindows()`（`new Date(y,m,d)`）、tokscale 的 `--today`。两者在 UTC 午夜（北京 08:00）/本地午夜（北京 00:00）附近会差一整天，导致一条本地 23:55 的会话被归到"昨天/明天"。原代码注释误以为 usage.js 的 `utcDayKey` 是用量分桶口径，其实它只用于跨记录去重（usage.js 第 271 行注释明说 today/month 是 device-local wall-clock）。
 - **修复**：两个适配器新增 `localDayBoundsMs`/`localMonthBoundsMs`（`new Date(d.getFullYear(),d.getMonth(),d.getDate())`），替换 `collectZcodeUsage`/`collectCoworkUsage` 的 `utcDayBoundsMs`/`utcMonthBoundsMs` 调用；`coworkSession.buildCoworkHistoryGraph` 的逐日 date key 从 `new Date(ts).toISOString().slice(0,10)`（UTC）改为新增的 `localDateKeyFromMs(ts)`（本地），对齐 collector 注入 history 的 `todayKey`（本地）和 history.js 里 graph date 与 todayKey 的字符串比较口径。
 - **验证**：修复后 `collectZcodeUsage` 在模拟 07-15 23:55 本地时刻返回 today=2824333（07-15 全天，正确）；跨到 07-16 00:00 后 today 归零重计。新增 3 个回归测试（zcodeSession/coworkSession 各一个本地午夜边界分桶、cowork graph 本地 date key），与既有测试合计 63/63 通过，eslint 无告警。
+
+## 七之二、分支布局（v0.58.0 更新）
+
+| 分支 | 内容 | 用途 |
+| --- | --- | --- |
+| `feature/zcode-cowork-support` | 上游 **v0.58.0** + fork 全部特性（ZCode / Cowork / Antigravity 本地兜底 / Windows 启动脚本） | fork 主线，本交接文档的基准 |
+| `fix/cursor-usage-archive` | **纯上游 v0.58.0 + 仅 cursor 修复**（tip `07d28c5`，1 个提交） | 保持干净，便于单独对外（如提上游 PR）；**不要往里塞 fork 特性** |
+| `integration/product` | 主线 + cherry-pick cursor 修复（tip `26fcc91` + 文档提交） | **产品实际运行的分支**：两者兼得 |
+| `integration/product-0.57` | 上一代集成分支（v0.57.0） | 仅作 0.57 快照，可删 |
+
+维护要点：
+
+- **升级流程**：先把主线 rebase 到新上游，再从干净的 cursor 分支 cherry-pick 那 1 个提交到新集成分支——**不要 rebase 集成分支本身**（否则会把 fork 的 40+ 提交和 cursor 修复一起重放，冲突要解两遍）。
+- cherry-pick 若出冲突，通常只在生成文件 `hubBuildRegistry.json`：取集成分支版本后 `node scripts/update-hub-build.js` + `npm run sync:worker` 重算。注意 `providers/cursor/sessionGuard.js`、`sessionUsageArchive.js`、`dailyHistoryArchive.js` **不在** worker 闭包（`WORKER_SHARED_MODULES`）里，所以这类改动通常不需要新增修订号。
+- cursor 分支继续改的话：`git switch integration/product && git cherry-pick <新提交>` 带上；fork 特性的改动只进主线与集成分支。
+- 主检出（`E:\tokenMonitor\token-monitor`）在 `integration/product`，app 从该目录启动；`feature/zcode-cowork-support` 挂在 worktree `E:\tm057`。
+
 
 ## 八、验证命令速查
 ```cmd
