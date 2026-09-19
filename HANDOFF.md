@@ -399,6 +399,33 @@ harness 每个 session 一份 transcript（`DSH_HOME` 可改根目录，默认 `
   - `git diff --check`：Clean；
   - 真实采集：`npm run agent:once -- --dry-run` 采集正常。
 
+### 2026-09-19 rebase：v0.58.0 → v0.59.0 ✅ 主线零冲突；**本地 cursor 修复退役，改取上游**
+
+- `git fetch` 后 `origin/main` 从 `bce50db`(v0.58.0) 前进到 `fa17225`(v0.59.0)，21 个提交；主线 48 个本地提交重放。回滚点 `backup/pre-v0.59-rebase` / `backup/pre-v0.59-integration` / `backup/pre-v0.59-cursor`。
+- **主线冲突：0**（`git merge-tree` 预检 + 实际 rebase 都干净）。48 个本地提交全部重放成功，含 antigravity 本地兜底、zcode/cowork 适配器、Windows 启动脚本。
+- **cursor 变更（本轮唯一的冲突，且是设计使然）**：v0.59.0 收录了 [PR #683](https://github.com/Javis603/token-monitor/pull/683) `2d78f4f fix(cursor): stop legacy sessions and liveDays inflating usage`——正是本地 `26fcc91` 那份修复，被维护者演进后合并。本地提交与上游属同一份实现的 `add/add` 撞车（`providers/cursor/sessionGuard.js`、`sessionUsageArchive.js`、`dailyHistoryArchive.js` + 2 个测试）。
+  - **按用户指示「上游已修好，可覆盖本地修复」**：`git rebase --skip` **丢弃**本地 `26fcc91`，完全取上游实现——**不是两边合并**，所以工作区无任何本地 cursor 残留。
+  - 上游版更完整：多 `providers/cursor/usageEvents.js`(120 行) 与 `sessionUsageArchiveStore.js`，测试多 95+265+70 行；本地方案为 6 文件 / 305 行。
+  - **由此 `fix/cursor-usage-archive` 分支退役**：它存在的唯一理由是「纯上游 + 仅 cursor 修复，便于单独提 PR」，而该 PR 已合并。分支已删除，tip 仍保存在 `backup/pre-v0.59-cursor`。
+- **生成文件**：`hubBuildRegistry.json`（src + worker）重放后 `node scripts/update-hub-build.js` 报 **already current**；与上游的差量只剩 fork 模块新增的 revision 42 那 4 行。
+- **`npm run check` 修死路径**：上游 #686 统一主界面拖拽处理时删掉了 `src/electron/renderer/preferenceDragSort.js` 与 `tests/electron/preferenceDragSort.test.js`（拆为 `rowDragController.js` / `verticalDragSort.js`，覆盖并入 `preferenceDragDom.test.js`），而 fork 自加的 `check` 脚本仍引用这两个文件 → `npm run check` 死在第一个。已删除这两个路径（`83140ec`），这是**唯一**的非 rebase 内容改动。
+- **⚠️ 本机环境坑（本轮踩到）**：DSH 沙箱只对 `E:\tokenMonitor\**` 授予写权限（该目录有一条额外的 `S-1-4-43644180-727624976` ACE）；`E:\` 根与 `E:\tm*` 一律 `Access denied`（`Set-Acl` / `fsutil` / WMI 也被拒）。**凡 rebase / worktree 写操作都要放在 `E:\tokenMonitor` 下做。** 本轮首次尝试在 `E:\tm057`（fork 主线原 worktree）里 rebase 直接被打回：`unable to unlink ... Invalid argument` / `cannot create directory at 'src/electron/edgeDock': Permission denied`。
+  - **调整**：注销 `E:\tm057` 的 worktree（`git worktree remove` 只能注销，物理目录因权限删不掉）+ 在可写路径重建为 **`E:\tokenMonitor\tm-mainline`**。`E:\tm-cursor` 同样注销（目录同样残留，可日后用管理员权限清理）。
+- **⚠️ `npm test` 在本沙箱不可用**：沙箱禁止创建子进程（连 `execFileSync('cmd',['/c','echo'])` 都 `EPERM`），而 `node --test` 默认**每个测试文件 spawn 一个子进程** → 全量 `npm test` 一片 `spawn EPERM`。**解决办法**：`node --test --test-isolation=none "tests/**/*.test.js"`（同进程内跑，不 spawn）。
+  - 注意 `--test-isolation=none` 削弱了文件间隔离：只跑部分文件时容易出现**跨文件状态污染**造成的假失败（本轮对照就踩到一次：同一文件 `releaseArtifactNames.test.js` 在 fork 是 10 tests/1 fail，在基线却整个文件加载失败）。**结论必须用「同一批文件、同一命令、两个 tree 对照」得出，不可跨命令比较。**
+- **验证（对照实验，回归数 = 0）**：用 v0.59.0 干净工作树跑同一条命令作基线：
+
+  | tree | tests | pass | fail |
+  | --- | --- | --- | --- |
+  | 干净上游 v0.59.0 | 4583 | 4566 | 10 |
+  | rebase 后 fork | 4625 | 4608 | **10（失败集逐条相同）** |
+
+  10 个失败全是环境问题：`symlinked packaged Widget artifacts`（Windows 符号链接权限）+ `spawn EPERM` 系列；其中 `release workflow pins Electron only for the Linux artifact` 一度被怀疑是真回归，隔离复测在**纯净 v0.59.0 上同样失败**（上游既有问题）。fork 净增 42 个通过测试（我们自己的 zcode/cowork/antigravity/sessionDetail 等专项）。
+  - `npm run check`：127 个文件全过、0 缺失；`git diff --check` clean；**无冲突标记残留**（`git grep` 扫 `src/`、`tests/`、`worker/`）。
+  - 依赖：v0.58→v0.59 只有 devDep `electron-builder` 26.15.3→26.16.1，**运行时依赖与 tokscale pin 都没变**，故无需 `npm install`。pin 仍 `mode: override` / baseVersion 4.17.0 / release `token-monitor-09cf5471`；实测 `node_modules/.bin/tokscale --version` → **tokscale 4.17.0**。
+  - `verify-vendored-tokscale-release.js` 需联网下载各平台资产，本沙箱下载中途 `This operation was aborted`（部分平台已验证通过），非代码问题。
+  - 本轮 rebase 后主线与集成分支**指向同一 tip**（`83140ec`）——cursor 差量已归上游，不再需要两个分支分叉。
+
 ### 2026-09-13 rebase：v0.57.0 → v0.58.0 ⚠️ 主线仅 1 处冲突（生成文件）
 - `git fetch` 后 `origin/main` 从 `bbe07de`(v0.57.0) 前进到 `bce50db`(v0.58.0)，16 个提交；主线 48 个本地提交重放。回滚点 `backup/pre-v0.58-rebase`。
 - **冲突**：只有生成的 `hubBuildRegistry.json`（src + worker，出现在 `59f2e18` 那次 registry 同步里）——**解决**：取上游后 `node scripts/update-hub-build.js` + `npm run sync:worker` 重新生成，单独提交为 `chore(hub): refresh the build registry after the v0.58.0 rebase`。其余 47 个提交（含 collector 的 antigravity 本地兜底、zcode/cowork 适配器等）全部干净重放。
@@ -489,22 +516,21 @@ harness 每个 session 一份 transcript（`DSH_HOME` 可改根目录，默认 `
 - **修复**：两个适配器新增 `localDayBoundsMs`/`localMonthBoundsMs`（`new Date(d.getFullYear(),d.getMonth(),d.getDate())`），替换 `collectZcodeUsage`/`collectCoworkUsage` 的 `utcDayBoundsMs`/`utcMonthBoundsMs` 调用；`coworkSession.buildCoworkHistoryGraph` 的逐日 date key 从 `new Date(ts).toISOString().slice(0,10)`（UTC）改为新增的 `localDateKeyFromMs(ts)`（本地），对齐 collector 注入 history 的 `todayKey`（本地）和 history.js 里 graph date 与 todayKey 的字符串比较口径。
 - **验证**：修复后 `collectZcodeUsage` 在模拟 07-15 23:55 本地时刻返回 today=2824333（07-15 全天，正确）；跨到 07-16 00:00 后 today 归零重计。新增 3 个回归测试（zcodeSession/coworkSession 各一个本地午夜边界分桶、cowork graph 本地 date key），与既有测试合计 63/63 通过，eslint 无告警。
 
-## 七之二、分支布局（v0.58.0 更新）
-
+## 七之二、分支布局（v0.59.0 更新）
 | 分支 | 内容 | 用途 |
 | --- | --- | --- |
-| `feature/zcode-cowork-support` | 上游 **v0.58.0** + fork 全部特性（ZCode / Cowork / Antigravity 本地兜底 / Windows 启动脚本） | fork 主线，本交接文档的基准 |
-| `fix/cursor-usage-archive` | **纯上游 v0.58.0 + 仅 cursor 修复**（tip `07d28c5`，1 个提交） | 保持干净，便于单独对外（如提上游 PR）；**不要往里塞 fork 特性** |
-| `integration/product` | 主线 + cherry-pick cursor 修复（tip `26fcc91` + 文档提交） | **产品实际运行的分支**：两者兼得 |
+| `feature/zcode-cowork-support` | 上游 **v0.59.0** + fork 全部特性（ZCode / Cowork / Antigravity 本地兜底 / Windows 启动脚本） | fork 主线，本交接文档的基准。worktree `E:\tokenMonitor\tm-mainline` |
+| `integration/product` | 主线 + 集成分支文档提交（tip `83140ec`，与主线同 tip） | **产品实际运行的分支**（主检出 `E:\tokenMonitor\token-monitor`） |
 | `integration/product-0.57` | 上一代集成分支（v0.57.0） | 仅作 0.57 快照，可删 |
+| ~~`fix/cursor-usage-archive`~~ | **已退役**（PR #683 已合并进 v0.59.0） | 不再需要：它的唯一作用是单独对外提 cursor PR。tip 保存在 `backup/pre-v0.59-cursor` |
 
-维护要点：
+维护要点（v0.59.0 起）：
 
-- **升级流程**：先把主线 rebase 到新上游，再从干净的 cursor 分支 cherry-pick 那 1 个提交到新集成分支——**不要 rebase 集成分支本身**（否则会把 fork 的 40+ 提交和 cursor 修复一起重放，冲突要解两遍）。
-- cherry-pick 若出冲突，通常只在生成文件 `hubBuildRegistry.json`：取集成分支版本后 `node scripts/update-hub-build.js` + `npm run sync:worker` 重算。注意 `providers/cursor/sessionGuard.js`、`sessionUsageArchive.js`、`dailyHistoryArchive.js` **不在** worker 闭包（`WORKER_SHARED_MODULES`）里，所以这类改动通常不需要新增修订号。
-- cursor 分支继续改的话：`git switch integration/product && git cherry-pick <新提交>` 带上；fork 特性的改动只进主线与集成分支。
-- 主检出（`E:\tokenMonitor\token-monitor`）在 `integration/product`，app 从该目录启动；`feature/zcode-cowork-support` 挂在 worktree `E:\tm057`。
-
+- **升级流程**：直接 `git rebase <新上游 tag>` 主线（fork 的 48 个提交）。**v0.59.0 起不再需要 cherry-pick cursor 修复，也不再需要单独重建集成分支**——cursor 差量已归上游，主线与集成分支指向同一 tip；集成分支只多我们的文档提交。
+- **rebase 冲突**通常只在生成文件 `hubBuildRegistry.json`：取上游版本后 `node scripts/update-hub-build.js` + `npm run sync:worker` 重算。
+- **⚠️ 所有 rebase / worktree 写操作必须在 `E:\tokenMonitor\**` 下做**（沙箱只对该子树授予写权限；`E:\tm*` 与 `E:\` 根一律 `Access denied`）。因此主线 worktree 已从 `E:\tm057` 迁到 `E:\tokenMonitor\tm-mainline`。
+- **⚠️ 跑测试用 `node --test --test-isolation=none "tests/**/*.test.js"`**（沙箱禁止 spawn，默认 `npm test` 会满屏 `spawn EPERM`）；结论必须两个 tree 同命令对照，不能跨命令比较（`--test-isolation=none` 有跨文件状态污染）。
+- 主检出（`E:\tokenMonitor\token-monitor`）在 `integration/product`，app 从该目录启动；**改完代码要重启 app 才生效**。
 
 ## 八、验证命令速查
 ```cmd
