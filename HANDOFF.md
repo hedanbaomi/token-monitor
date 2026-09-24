@@ -399,6 +399,27 @@ harness 每个 session 一份 transcript（`DSH_HOME` 可改根目录，默认 `
   - `git diff --check`：Clean；
   - 真实采集：`npm run agent:once -- --dry-run` 采集正常。
 
+### 2026-09-24 rebase：v0.59.0 → v0.62.0 ⚠️ 跨 3 个版本；2 处真实冲突（`usage.js` 家族 + 生成文件）
+
+- `git fetch` 后 `origin/main` 从 `fa17225`(v0.59.0) 经 `8031cf3`(v0.60.0)、`dc3cc13`(v0.61.0) 前进到 `dcccfb0`(v0.62.0)，上游 **259 文件 / +26051 / -4433**；主线 52 个本地提交重放（比上轮多 4 个）。回滚点 `backup/pre-v0.62-rebase` / `backup/pre-v0.62-integration` / `backup/pre-v0.62-main`。
+- **冲突预检**（`git merge-tree`）：正好 4 个文件 —— `src/shared/usage.js`、`worker/src/shared/usage.js`、`src/shared/hubBuildRegistry.json`、`worker/src/shared/hubBuildRegistry.json`。`collector.js`、`app.js`、`history.js`、`clientHealth.js` 这些大块**全部自动合并**。
+- **冲突 1（`b7987fa` 与 `9e32209`，`usage.js` 家族）**：上游在同一段把 `micode` 折叠进 `mimo`（`if (raw.includes('micode') || raw.includes('mimo')) return 'mimo'`），而我们的改动是给 zcode 加别名。**解决**：两者合并——保留上游的 `mimo` 折叠，并把 zcode 判定写成 `raw.includes('zcode') || raw.includes('z-code')`。`src/` 与 `worker/src/` 两份都要改（worker 是同文件镜像）。
+- **冲突 2（`4f9760e`，生成文件 `hubBuildRegistry.json`）**：解决后取上游版本 + `node scripts/update-hub-build.js` + `npm run sync:worker` 重算。
+- **⚠️ 本轮踩到并纠正的坑**：rebase 中途**不能**用 `git checkout --theirs` 取上游版本——rebase 里 `--theirs` 是**正在重放的我们的提交**，`--ours` 才是上游。第一次照抄上一轮的做法，结果把注册表退回我们那份旧的（core 43 个修订），**丢了上游已发布的 11 个 build 记录**。正确做法：`git show v0.62.0:<path>` 取 tag 内容写回（用脚本写，别走 PowerShell 管道——`Set-Content -NoNewline` 会把 263 行压成 1 行），再跑 `update-hub-build`，于是得到 **upstream 54 个修订 + 我们的 revision 55**，与上游差量恰好 4 行。
+- **生成文件结果**：`src/shared/hubBuildRegistry.json` core 54→**55**（我们的 fork 源码哈希），worker 副本同步为 55；`git diff --stat v0.62.0` 只多 4 行。
+- **依赖/pin**：运行时依赖没变；`scripts/vendor/tokscale.json` 的 pin 换成了新 release **`token-monitor-06a9f162`**（baseVersion 仍 4.17.0，故 `npm install` 不需要）。**换 pin 的二进制要先停 app**（Windows 文件占用会 EPERM）。
+- **上游 v0.60/v0.61/v0.62 值得注意**：①新增 Oh My Pi（`omp`，判定必须排在通用 Pi 之前）、TypeSafe 额度、Devin、Kimi Code（#726）、Alibaba Bailian、WorkBuddy 登录；②`usage.js` 新增 **contextTokens/contextWindow 会话占用快照**（freshest-wins 合并，注释明确写了「absent 不等于空的」）；③Edge Dock 数值格式统一（#784/#787）；④上游修掉了我们上一轮列为环境失败的 `release workflow pins Electron only for the Linux artifact`。
+- **验证（对照实验，回归数 = 0）**：
+
+  | tree | tests | pass | fail |
+  | --- | --- | --- | --- |
+  | 干净上游 v0.62.0 | 4986 | 4972 | 7 |
+  | rebase 后 fork | 5028 | 5014 | **7（失败集逐条相同）** |
+
+  7 个失败与上一轮同源，全是环境问题（Windows 符号链接权限 + 沙箱禁 spawn）。fork 净增 42 个通过测试；我们的专项套件（zcode/cowork/sessionDetail/antigravity/hubBuild/clientHealth + usage）单独跑 **165/165 全绿**。
+  - `npm run check`：127 文件全过；`git diff --check` clean；`git grep` 扫 `src/`、`worker/`、`tests/` **无冲突标记残留**。
+- **rebase 操作细节（本沙箱）**：全程用 `node --test --test-isolation=none "tests/**/*.test.js"`；rebase 中途 `git rebase --continue` 会因 `Terminal is dumb, but EDITOR unset` 失败，需 `GIT_EDITOR=true`（`cmd /c exit 0` 无效——git 会把文件名追加到命令后）；conflict 解决后先 `git add -A` 再 continue。
+
 ### 2026-09-19 rebase：v0.58.0 → v0.59.0 ✅ 主线零冲突；**本地 cursor 修复退役，改取上游**
 
 - `git fetch` 后 `origin/main` 从 `bce50db`(v0.58.0) 前进到 `fa17225`(v0.59.0)，21 个提交；主线 48 个本地提交重放。回滚点 `backup/pre-v0.59-rebase` / `backup/pre-v0.59-integration` / `backup/pre-v0.59-cursor`。
@@ -516,18 +537,18 @@ harness 每个 session 一份 transcript（`DSH_HOME` 可改根目录，默认 `
 - **修复**：两个适配器新增 `localDayBoundsMs`/`localMonthBoundsMs`（`new Date(d.getFullYear(),d.getMonth(),d.getDate())`），替换 `collectZcodeUsage`/`collectCoworkUsage` 的 `utcDayBoundsMs`/`utcMonthBoundsMs` 调用；`coworkSession.buildCoworkHistoryGraph` 的逐日 date key 从 `new Date(ts).toISOString().slice(0,10)`（UTC）改为新增的 `localDateKeyFromMs(ts)`（本地），对齐 collector 注入 history 的 `todayKey`（本地）和 history.js 里 graph date 与 todayKey 的字符串比较口径。
 - **验证**：修复后 `collectZcodeUsage` 在模拟 07-15 23:55 本地时刻返回 today=2824333（07-15 全天，正确）；跨到 07-16 00:00 后 today 归零重计。新增 3 个回归测试（zcodeSession/coworkSession 各一个本地午夜边界分桶、cowork graph 本地 date key），与既有测试合计 63/63 通过，eslint 无告警。
 
-## 七之二、分支布局（v0.59.0 更新）
+## 七之二、分支布局（v0.62.0 更新）
 | 分支 | 内容 | 用途 |
 | --- | --- | --- |
-| `feature/zcode-cowork-support` | 上游 **v0.59.0** + fork 全部特性（ZCode / Cowork / Antigravity 本地兜底 / Windows 启动脚本） | fork 主线，本交接文档的基准。worktree `E:\tokenMonitor\tm-mainline` |
-| `integration/product` | 主线 + 集成分支文档提交（tip `83140ec`，与主线同 tip） | **产品实际运行的分支**（主检出 `E:\tokenMonitor\token-monitor`） |
+| `feature/zcode-cowork-support` | 上游 **v0.62.0** + fork 全部特性（ZCode / Cowork / Antigravity 本地兜底 / Windows 启动脚本） | fork 主线，本交接文档的基准。worktree `E:\tokenMonitor\tm-mainline` |
+| `integration/product` | 主线 + 集成分支文档提交（tip `00a85d5`，与主线同 tip） | **产品实际运行的分支**（主检出 `E:\tokenMonitor\token-monitor`） |
 | `integration/product-0.57` | 上一代集成分支（v0.57.0） | 仅作 0.57 快照，可删 |
 | ~~`fix/cursor-usage-archive`~~ | **已退役**（PR #683 已合并进 v0.59.0） | 不再需要：它的唯一作用是单独对外提 cursor PR。tip 保存在 `backup/pre-v0.59-cursor` |
 
-维护要点（v0.59.0 起）：
+维护要点（v0.62.0 起）：
 
-- **升级流程**：直接 `git rebase <新上游 tag>` 主线（fork 的 48 个提交）。**v0.59.0 起不再需要 cherry-pick cursor 修复，也不再需要单独重建集成分支**——cursor 差量已归上游，主线与集成分支指向同一 tip；集成分支只多我们的文档提交。
-- **rebase 冲突**通常只在生成文件 `hubBuildRegistry.json`：取上游版本后 `node scripts/update-hub-build.js` + `npm run sync:worker` 重算。
+- **升级流程**：直接 `git rebase <新上游 tag>` 主线（fork 的 52 个提交）。**v0.59.0 起不再需要 cherry-pick cursor 修复，也不再需要单独重建集成分支**——cursor 差量已归上游，主线与集成分支指向同一 tip；集成分支只多我们的文档提交。
+- **rebase 冲突**通常落在生成文件 `hubBuildRegistry.json`（取上游版本后 `node scripts/update-hub-build.js` + `npm run sync:worker` 重算）与 `usage.js` 家族（上游会重排 `normalizeClientName`，我们的 zcode 别名要手工并进去，`src/` 与 `worker/src/` 两份）。**⚠️ rebase 中途不要用 `git checkout --theirs` 取上游**：rebase 里 `--theirs` 是正在重放的我方提交，取上游要用 `git show <tag>:<path>`。
 - **⚠️ 所有 rebase / worktree 写操作必须在 `E:\tokenMonitor\**` 下做**（沙箱只对该子树授予写权限；`E:\tm*` 与 `E:\` 根一律 `Access denied`）。因此主线 worktree 已从 `E:\tm057` 迁到 `E:\tokenMonitor\tm-mainline`。
 - **⚠️ 跑测试用 `node --test --test-isolation=none "tests/**/*.test.js"`**（沙箱禁止 spawn，默认 `npm test` 会满屏 `spawn EPERM`）；结论必须两个 tree 同命令对照，不能跨命令比较（`--test-isolation=none` 有跨文件状态污染）。
 - 主检出（`E:\tokenMonitor\token-monitor`）在 `integration/product`，app 从该目录启动；**改完代码要重启 app 才生效**。
