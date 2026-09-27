@@ -7,6 +7,7 @@ const { simpleHostSourceRoots } = require('./clientSourceRegistration');
 const { normalizeCustomScanPaths } = require('./customScanPaths');
 const { tokscaleConfigDir, tokscaleHomeDir } = require('./tokscaleConfig');
 const { claudeSessionRoots } = require('./providers/claude/paths');
+const coworkSession = require('./coworkSession');
 const { hermesProfileWatchDirs, resolveHermesHome } = require('./providers/hermes/profiles');
 const { kimiCodeSessionsHome, kimiWorkSessionsRoots } = require('./providers/kimi/sessionMetadata');
 const { qoderCnDataPaths } = require('./providers/qodercn/usage');
@@ -163,6 +164,23 @@ function clientSourceRoots(clientsCsv, options = {}) {
   };
   const claudeRoots = claudeSessionRoots({ homeDir: home });
   add('claude', ['claude-projects', claudeRoots.projects], ['claude-transcripts', claudeRoots.transcripts]);
+  // Cowork transcripts live under the Claude Desktop app's data root (an MSIX
+  // package sandbox on Windows), resolved dynamically by coworkSession. Watched
+  // whenever claude is tracked — cowork tokens attribute to the `claude` client
+  // (never a separate row), so its roots merge into `claude` rather than an
+  // untracked `cowork` key, which would violate clientPartitionInvariants (every
+  // watch-mapped id must be a tracked id) and degrade every watch tick to a full
+  // scan. Independent of CLAUDE_CONFIG_DIR: that env only relocates Claude Code's
+  // projects/transcripts; Cowork still writes into the Desktop sandbox.
+  if (enabled.has('claude')) {
+    const coworkRoots = coworkSession.sessionsRoots({});
+    if (coworkRoots.length) {
+      byClient.claude = [
+        ...(byClient.claude || []),
+        ...coworkRoots.map((dir) => ({ id: 'cowork-sessions', dir }))
+      ];
+    }
+  }
   const codexHome = nonBlankEnvPath('CODEX_HOME', path.join(home, '.codex'));
   add(
     'codex',

@@ -4,6 +4,8 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const coworkSession = require('./coworkSession');
+const { antigravityLocalMirrorHome } = require('./antigravityLocalMirror');
 const semver = require('semver');
 const { abortReason, throwIfAborted } = require('./abortSignal');
 const { readJson, sharedDataDir } = require('./config');
@@ -565,6 +567,21 @@ function runTokscale({
   ), signal);
 }
 
+// Run tokscale against an explicit home directory: the Windows Antigravity
+// fallback points tokscale at a mirror of the IDE conversation store so the CLI
+// source it cannot sync from the DesktopAgent RPC still contributes usage.
+function runTokscaleAtHome(options) {
+  return runTokscale({
+    clients: options.clients,
+    flags: options.flags || [],
+    commandTimeoutMs: options.commandTimeoutMs,
+    signal: options.signal,
+    terminationOptions: options.terminationOptions,
+    onTerminationUnconfirmed: options.onTerminationUnconfirmed,
+    homeDir: options.homeDir
+  });
+}
+
 function runTokscaleGraph({ clients, commandTimeoutMs, signal, terminationOptions, onTerminationUnconfirmed, customScanPaths, homeDir }) {
   throwIfAborted(signal);
   const command = tokscaleCommand({ customScanPaths, homeDir });
@@ -986,6 +1003,125 @@ const selfSyncThrottle = createSelfSyncThrottle();
 const { maybeSyncCursor } = createCursorSelfSync({ selfSyncThrottle });
 const { maybeSyncAntigravity } = createAntigravitySelfSync({ selfSyncThrottle, tokscaleCommand });
 
+function antigravityLocalConversationRoots(home = os.homedir()) {
+  return antigravityDataRoots(home)
+    .map((root) => path.join(root, 'conversations'))
+    .filter(dirExists);
+}
+
+async function scanAntigravityConversationRoot(sourceRoot, options = {}) {
+  const mirror = options.antigravityLocalMirrorHome || antigravityLocalMirrorHome;
+  const homeDir = mirror(sourceRoot, { logger: options.logger });
+  throwIfAborted(options.signal);
+  const run = options.runTokscaleAtHome || runTokscaleAtHome;
+  return run({
+    homeDir,
+    clients: 'antigravity-cli',
+    flags: options.flags,
+    commandTimeoutMs: options.commandTimeoutMs,
+    signal: options.signal,
+    terminationOptions: options.terminationOptions,
+    onTerminationUnconfirmed: options.onTerminationUnconfirmed
+  });
+}
+
+function tokscaleRowSessionId(row) {
+  return String(
+    row?.sessionId
+    || row?.session_id
+    || row?.session
+    || row?.conversationId
+    || row?.conversation_id
+    || row?.threadId
+    || row?.thread_id
+    || ''
+  ).trim();
+}
+
+async function collectWindowsAntigravityLocalUsage(options = {}) {
+  const roots = antigravityLocalConversationRoots(options.homeDir || os.homedir());
+  const seenSessions = new Set();
+  const entries = [];
+  for (const root of roots) {
+    throwIfAborted(options.signal);
+    let result;
+    try {
+      result = await scanAntigravityConversationRoot(root, options);
+    } catch (error) {
+      if (options.signal?.aborted) throw abortReason(options.signal);
+      if (typeof options.logger === 'function') options.logger(`antigravity local scan failed: ${error.message}`);
+      continue;
+    }
+    const bySession = new Map();
+    for (const row of Array.isArray(result?.entries) ? result.entries : []) {
+      const sessionId = tokscaleRowSessionId(row);
+      if (!sessionId) continue;
+      if (!bySession.has(sessionId)) bySession.set(sessionId, []);
+      bySession.get(sessionId).push(row);
+    }
+    for (const [sessionId, rows] of bySession) {
+      if (seenSessions.has(sessionId)) continue;
+      seenSessions.add(sessionId);
+      entries.push(...rows);
+    }
+  }
+  throwIfAborted(options.signal);
+  return { entries };
+}
+
+function antigravityRowsBySession(json) {
+  const bySession = new Map();
+  for (const row of Array.isArray(json?.entries) ? json.entries : []) {
+    if (normalizeClientName(row?.client || row?.source || row?.tool) !== 'antigravity') continue;
+    const sessionId = tokscaleRowSessionId(row);
+    if (!sessionId) continue;
+    if (!bySession.has(sessionId)) bySession.set(sessionId, []);
+    bySession.get(sessionId).push(row);
+  }
+  return bySession;
+}
+
+function usageRowsTotal(rows) {
+  return extractUsageFromTokscale({ entries: rows }).totalTokens;
+}
+
+function mergeAntigravityLocalRows(primaryJson, localJson) {
+  // The shared extractor intentionally accepts nested/legacy tokscale shapes,
+  // but safe row replacement needs one authoritative array to edit. If either
+  // side is not that current shape, preserve the primary result unchanged.
+  if (!Array.isArray(primaryJson?.entries) || !Array.isArray(localJson?.entries)) return primaryJson;
+  const primaryBundle = extractUsageBundleFromTokscale(primaryJson);
+  const primaryAntigravity = primaryBundle.byClient.antigravity;
+  const unattributed = primaryBundle.byClient[UNATTRIBUTED_USAGE_CLIENT];
+  const primarySessions = Object.values(primaryAntigravity?.sessions || {});
+  const sessionTokens = primarySessions.reduce((sum, session) => sum + Number(session.totalTokens || 0), 0);
+  const sessionCosts = primarySessions.reduce((sum, session) => sum + Number(session.costUsd || 0), 0);
+  // Sessionless usage cannot be reconciled safely with local session rows. Keep
+  // the primary result intact instead of risking a second copy of the same use.
+  if (
+    periodHasUsage(unattributed)
+    || Number(primaryAntigravity?.totalTokens || 0) > sessionTokens
+    || Number(primaryAntigravity?.costUsd || 0) > sessionCosts + Number.EPSILON
+  ) {
+    return primaryJson;
+  }
+
+  const primaryRows = antigravityRowsBySession(primaryJson);
+  const localRows = antigravityRowsBySession(localJson);
+  const replaceSessions = new Set();
+  for (const [sessionId, rows] of localRows) {
+    const primary = primaryRows.get(sessionId);
+    if (!primary || usageRowsTotal(rows) > usageRowsTotal(primary)) replaceSessions.add(sessionId);
+  }
+  if (replaceSessions.size === 0) return primaryJson;
+  const retained = (Array.isArray(primaryJson?.entries) ? primaryJson.entries : []).filter((row) => {
+    if (normalizeClientName(row?.client || row?.source || row?.tool) !== 'antigravity') return true;
+    return !replaceSessions.has(tokscaleRowSessionId(row));
+  });
+  const replacements = [...replaceSessions].flatMap((sessionId) => localRows.get(sessionId) || []);
+  return { ...primaryJson, entries: [...retained, ...replacements] };
+}
+
 const HISTORY_CAP_DAYS = 370;
 const HISTORY_TIMEOUT_MS = 60000;
 const DEFAULT_HISTORY_INTERVAL_MS = 15 * 60 * 1000;
@@ -1119,6 +1255,33 @@ async function collectUsageOnce(options) {
     applyTokscaleSessionMetadata(json, { resolveProjects: projectsEnabled });
     return json;
   };
+  // Period scans funnel through here so the Windows Antigravity local fallback
+  // supplements (never duplicates) every scan that includes antigravity.
+  const runScanFn = async (input) => {
+    const primaryJson = await runTokscaleFn(input);
+    throwIfAborted(options.signal);
+    if (!useWindowsAntigravityLocal) return primaryJson;
+    const requestedClients = new Set(normalizeClientsCsv(input.clients).split(',').filter(Boolean));
+    if (!requestedClients.has('antigravity')) return primaryJson;
+    try {
+      const localJson = await collectAntigravityLocal({
+        homeDir: options.homeDir || os.homedir(),
+        flags: [...(input.flags || [])],
+        commandTimeoutMs,
+        logger: options.logger,
+        signal: options.signal,
+        terminationOptions: options.subprocessTerminationOptions,
+        onTerminationUnconfirmed: () => reportTerminationUnconfirmed('antigravity-local-scan')
+      });
+      throwIfAborted(options.signal);
+      return mergeAntigravityLocalRows(primaryJson, localJson);
+    } catch (error) {
+      if (options.signal?.aborted) throw abortReason(options.signal);
+      if (typeof options.logger === 'function') options.logger(`antigravity local fallback failed: ${error.message}`);
+      return primaryJson;
+    }
+  };
+
   const runGraphFn = options.runGraph || ((input) => runTokscaleGraph({
     ...input,
     customScanPaths: options.customScanPaths,
@@ -1161,6 +1324,23 @@ async function collectUsageOnce(options) {
   const includesProma = normalizedClients.split(',').includes('proma');
   const includesQoderCn = normalizedClients.split(',').includes('qodercn');
   const trackedClientSet = new Set(normalizedClients.split(',').filter(Boolean));
+  // Windows Antigravity fallback: the DesktopAgent RPC sync cannot see every
+  // IDE conversation, so the local SQLite mirror is scanned through
+  // `tokscale --home <mirror> --client antigravity-cli` and merged per session
+  // (newer reading wins) into the RPC result.
+  const hasExplicitAntigravityLocal = typeof options.collectAntigravityLocalUsage === 'function';
+  const useWindowsAntigravityLocal = platformValue === 'win32'
+    && trackedClientSet.has('antigravity')
+    && (
+      hasExplicitAntigravityLocal
+      || (
+        options.homeDir === undefined
+        && typeof options.runTokscale !== 'function'
+        && typeof options.runAntigravitySync !== 'function'
+      )
+    );
+  const collectAntigravityLocal = options.collectAntigravityLocalUsage || collectWindowsAntigravityLocalUsage;
+
   const targetClients = [...new Set(normalizeClientsCsv(options.targetClients).split(',').filter((client) => trackedClientSet.has(client)))];
   const targetRequested = targetClients.length > 0;
   const targetClientSet = new Set(targetClients);
@@ -1277,7 +1457,7 @@ async function collectUsageOnce(options) {
       let freshPartitions = Object.create(null);
       let useTargetedPartitions = targetRequested;
       if (scanClients) {
-        const todayJson = await runTokscaleFn({ clients: scanClients, flags: ['--today'], commandTimeoutMs, signal: options.signal });
+        const todayJson = await runScanFn({ clients: scanClients, flags: ['--today'], commandTimeoutMs, signal: options.signal });
         throwIfAborted(options.signal);
         const bundle = extractUsageBundleFromTokscale(todayJson);
         freshPartitions = bundle.byClient;
@@ -1302,7 +1482,7 @@ async function collectUsageOnce(options) {
           // the requested set. An unattributed row or an unexpected client would
           // otherwise clear the target while partially overwriting an unrelated
           // anchor partition. Rebuild the complete today snapshot instead.
-          const fullTodayJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--today'], commandTimeoutMs, signal: options.signal });
+          const fullTodayJson = await runScanFn({ clients: tokscaleClients, flags: ['--today'], commandTimeoutMs, signal: options.signal });
           throwIfAborted(options.signal);
           freshPartitions = extractUsageBundleFromTokscale(fullTodayJson).byClient;
           useTargetedPartitions = false;
@@ -1342,22 +1522,42 @@ async function collectUsageOnce(options) {
     } else if (tokscaleClients) {
       // Serial on purpose: concurrent scans triple the peak CPU/IO load, which
       // is what let the issue #15 self-trigger loop spike tokscale past 500% CPU.
-      const todayJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--today'], commandTimeoutMs, signal: options.signal });
+      const todayJson = await runScanFn({ clients: tokscaleClients, flags: ['--today'], commandTimeoutMs, signal: options.signal });
       throwIfAborted(options.signal);
       const todayBundle = extractUsageBundleFromTokscale(todayJson);
       today = todayBundle.period;
       todayPartitions = todayBundle.byClient;
       if (typeof options.onProgress === 'function') decorateLocalPeriods({ today });
       emitProgress({ today });
-      const monthJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--month'], commandTimeoutMs, signal: options.signal });
+      const monthJson = await runScanFn({ clients: tokscaleClients, flags: ['--month'], commandTimeoutMs, signal: options.signal });
       throwIfAborted(options.signal);
       month = extractUsageFromTokscale(monthJson);
       if (typeof options.onProgress === 'function') decorateLocalPeriods({ today, month });
       emitProgress({ today, month });
-      const allTimeJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--since', allTimeSince], commandTimeoutMs, signal: options.signal });
+      const allTimeJson = await runScanFn({ clients: tokscaleClients, flags: ['--since', allTimeSince], commandTimeoutMs, signal: options.signal });
       throwIfAborted(options.signal);
       allTime = extractUsageFromTokscale(allTimeJson);
     }
+    // Cowork (the Claude Desktop agent feature) writes standard Claude Code
+    // transcripts in a sandboxed path tokscale never reads. Its tokens are the
+    // same Claude models, so coworkSession attributes them to the `claude` client
+    // — merged here whenever `claude` is tracked, so Claude Code + Cowork appear
+    // as one `claude` tool row and one `claude-opus-*` model row. No overlap with
+    // the tokscale claude scan (different on-disk roots), so no double-count.
+    if (normalizedClients && coworkEnabled(normalizedClients) && coworkSession.dataDirPresent({})) {
+      try {
+        const coworkPeriods = coworkSession.collectCoworkUsage({
+          allTimeSince,
+          pricing: zcodePricingMap(options.customModelPricing)
+        });
+        today = mergePeriods(today, coworkPeriods.today);
+        month = mergePeriods(month, coworkPeriods.month);
+        allTime = mergePeriods(allTime, coworkPeriods.allTime);
+      } catch (error) {
+        if (typeof options.logger === 'function') options.logger(`cowork usage read failed: ${error.message}`);
+      }
+    }
+
     // Always decorate: session timestamps drive the recency sort regardless of the
     // Projects opt-out (issue #182). decorateLocalPeriods gates only project identity
     // on projectsEnabled, so opting out still costs the timestamp backfill and nothing
@@ -1699,6 +1899,34 @@ function selfSyncSourceRootsForClients(clientsCsv) {
     if (sourceRoots.length > 0) rootsByClient.antigravity = sourceRoots;
   }
   return rootsByClient;
+}
+
+function tokscaleClientsCsv(clientsCsv) {
+  const local = new Set(PARSE_LOCAL_CLIENTS);
+  const kept = normalizeClientsCsv(clientsCsv).split(',').filter((c) => c && !local.has(c));
+  return kept.join(',');
+}
+
+function coworkEnabled(clientsCsv) {
+  return new Set(normalizeClientsCsv(clientsCsv).split(',').filter(Boolean)).has('claude');
+}
+
+function zcodePricingMap(customModelPricing) {
+  const resolved = typeof customModelPricing === 'function' ? customModelPricing() : customModelPricing;
+  const list = Array.isArray(resolved) ? resolved : [];
+  const map = {};
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object' || !entry.modelId) continue;
+    const inputPerM = Number(entry.inputPerM);
+    const outputPerM = Number(entry.outputPerM);
+    const cacheReadPerM = Number(entry.cacheReadPerM);
+    const price = {};
+    if (Number.isFinite(inputPerM) && inputPerM > 0) price.inputPerM = inputPerM;
+    if (Number.isFinite(outputPerM) && outputPerM > 0) price.outputPerM = outputPerM;
+    if (Number.isFinite(cacheReadPerM) && cacheReadPerM > 0) price.cacheReadPerM = cacheReadPerM;
+    if (price.inputPerM || price.outputPerM || price.cacheReadPerM) map[String(entry.modelId).trim()] = price;
+  }
+  return map;
 }
 
 function watchClientRootsForClients(clientsCsv, options = {}) {
