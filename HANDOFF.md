@@ -399,6 +399,30 @@ harness 每个 session 一份 transcript（`DSH_HOME` 可改根目录，默认 `
   - `git diff --check`：Clean；
   - 真实采集：`npm run agent:once -- --dry-run` 采集正常。
 
+### 2026-09-27 rebase：v0.62.0 → v0.63.0 ⚠️ 上游大重构（`clientSources.js` 抽离），集成分支**必须手工回填 fork 接线**
+
+- 上游 v0.63.0 跨度大：**259 文件 / +10186 / −5552**，其中 `collector.js` **−617 行**——客户端来源接线被抽成新文件 `src/shared/clientSources.js`、`clientSourceRegistration.js`、`clientSourceObservations.js`。主线 54 个本地提交重放。
+- **冲突预检**：`usage.js` 家族 ×2、`hubBuildRegistry.json` ×2、`collector.js`（我们的 `clientSourceRoots` 编辑撞上它被搬走）。
+- **⚠️⚠️ 本轮最大的坑：`collector.js` 的冲突是「结构性假冲突」**。rebase 时我们的提交按老行号编辑 `clientSourceRoots`，而上游把整块搬进了 `clientSources.js`，于是每个碰过该区的提交都报一个「ours 空 / theirs 大段」的冲突。**若照上一轮经验整体取上游版本，会把 fork 的接线整段丢掉**——结果 `coworkEnabled`/`coworkSession` 变成**未定义的悬挂引用**（跑到 history graph 就 ReferenceError），`npm test` 从 9 fail 涨到 **25 fail**。
+- **正确处置**：冲突先用上游侧解掉（本轮 7 轮自动化解都是结构性假冲突），**然后把 fork 的语义回填到 v0.63.0 的新结构上**：
+  - `runTokscaleAtHome` 适配新 API（v0.63 的 `runTokscale` 已支持 `homeDir`）；
+  - 移植 `antigravityLocalConversationRoots` / `collectWindowsAntigravityLocalUsage` / `mergeAntigravityLocalRows` 等 7 个函数；
+  - 新增 **`runScanFn` 包装**：所有周期扫描（today/month/since）都经它，Windows 下按 session 合并 antigravity 本地镜像（绝不重复计数 RPC 缓存）；**保留 fork 的开关语义**——调用方注入了 `runTokscale`/`runAntigravitySync` 就说明它自己管来源，隐式 fallback 必须关闭（这条也正好让 collectorLoadGuards 的 3 个目标扫描断言不被多出来的本地扫描污染）；
+  - Cowork 原生读取回填到周期合并与 history graph；
+  - `clientSources.js` 里把 Cowork 会话根以 **`cowork-sessions`** 检查 id 注册到 **`claude`** 名下（配 clientHealth 既有的 allowlist 条目）。**不能注册成独立的 `cowork` key**——那会违反 `clientPartitionInvariants`（每个 watch-mapped id 必须是被追踪的 client），让每次 watch tick 退化成全量扫描。
+- **生成文件**：注册表保留上游 54 个修订 + 我们 revision 55；`update-hub-build` + `sync:worker` 后与上游差量 4 行。
+- **`check` 脚本**：上游又删了 `limitProviderOrder.js`/`limitProviderPresentation.js`，并把 renderer 拆出 29 个新模块（`rowDragController`/`verticalDragSort` 等）。已删死路径并补齐——引用数 127 → **154**。
+- **验证（对照实验，回归数 = 0）**：
+
+  | tree | tests | pass | fail |
+  | --- | --- | --- | --- |
+  | 干净上游 v0.63.0 | 5138 | 5122 | 9 |
+  | rebase 后 fork | 5188 | 5172 | **9（失败集逐条相同）** |
+
+  用失败数据定位回填范围：25 fail → 补 antigravity fallback 后 14 → 补 allowlist/clientSources 后 9。最终 9 个全是环境问题（Windows 符号链接权限 + 沙箱禁 spawn）。fork 净增 34 个通过；自有套件 225/225；`npm run check` 154 文件全过。
+- **PR 分支（干净版）**：`fix/daily-archive-alltime-floor` 的**远端 tip `e9fabbf1` 才是真 PR 分支**（上游 main + 仅本 PR 的 1 个提交）；本地曾有的 `53104c0b` 是塞进 fork 产品线的副本，不要混淆。本轮已 rebase 到 v0.63.0 → **`f3272dd9`**，1 个提交、4 文件 / +502，`merge-tree` 预检零冲突，fix 自身测试 62/62。
+- **产品分支**：`integration/product` = 主线（v0.63.0 + 54 fork 提交）+ 回填提交 `34f831da`；主线与集成分支仍同 tip。
+
 ### 2026-09-24 rebase：v0.59.0 → v0.62.0 ⚠️ 跨 3 个版本；2 处真实冲突（`usage.js` 家族 + 生成文件）
 
 - `git fetch` 后 `origin/main` 从 `fa17225`(v0.59.0) 经 `8031cf3`(v0.60.0)、`dc3cc13`(v0.61.0) 前进到 `dcccfb0`(v0.62.0)，上游 **259 文件 / +26051 / -4433**；主线 52 个本地提交重放（比上轮多 4 个）。回滚点 `backup/pre-v0.62-rebase` / `backup/pre-v0.62-integration` / `backup/pre-v0.62-main`。
